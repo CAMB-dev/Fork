@@ -3,7 +3,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from traffic_bert.data.build import BuildConfig, build_processed_dataset
+from traffic_bert.data.build import BuildConfig, build_config_from_yaml, build_processed_dataset
 from traffic_bert.data.pcap import PcapFlowExtractor
 from traffic_bert.data.schema import InputView
 
@@ -63,3 +63,71 @@ def test_build_processed_dataset_from_pcap(tmp_path: Path) -> None:
     assert set(frame["view"]) == {"payload_only", "masked_header_packet"}
     assert set(frame["major_label"]) == {"dos_ddos"}
 
+
+def test_build_processed_dataset_with_cic_csv_labels(tmp_path: Path) -> None:
+    scapy = pytest.importorskip("scapy.all")
+
+    pcap_path = tmp_path / "traffic.pcap"
+    packets = [
+        scapy.Ether()
+        / scapy.IP(src="10.0.0.1", dst="10.0.0.2")
+        / scapy.TCP(sport=1234, dport=80)
+        / scapy.Raw(b"payload")
+    ]
+    scapy.wrpcap(str(pcap_path), packets)
+    labels_path = tmp_path / "labels.csv"
+    pd.DataFrame(
+        [
+            {
+                "Source IP": "10.0.0.1",
+                "Destination IP": "10.0.0.2",
+                "Source Port": 1234,
+                "Destination Port": 80,
+                "Protocol": 6,
+                "Label": "DoS Hulk",
+            }
+        ]
+    ).to_csv(labels_path, index=False)
+
+    output_path = tmp_path / "train.parquet"
+    build_processed_dataset(
+        BuildConfig(
+            input_path=pcap_path,
+            output_path=output_path,
+            label_map_path=Path("configs/label_map.yaml"),
+            source_dataset="cic-unit",
+            label_source="cic_csv",
+            label_csv_path=labels_path,
+            views=(InputView.PAYLOAD_ONLY,),
+        )
+    )
+
+    frame = pd.read_parquet(output_path)
+    assert frame["source_label"].tolist() == ["DoS Hulk"]
+    assert frame["minor_labels"].iloc[0] == ["dos_hulk"]
+
+
+def test_build_config_from_yaml(tmp_path: Path) -> None:
+    config_path = tmp_path / "build.yaml"
+    output_path = tmp_path / "out.parquet"
+    config_path.write_text(
+        f"""
+label_map: configs/label_map.yaml
+build:
+  views: [payload_only]
+  label_source: static
+  static_label: DDoS
+datasets:
+  - dataset: unit
+    raw_path: {tmp_path / "input.pcap"}
+    processed_path: {output_path}
+""",
+        encoding="utf-8",
+    )
+
+    configs = build_config_from_yaml(config_path)
+
+    assert len(configs) == 1
+    assert configs[0].source_dataset == "unit"
+    assert configs[0].static_label == "DDoS"
+    assert configs[0].views == (InputView.PAYLOAD_ONLY,)

@@ -18,4 +18,6 @@ train:
   gradient_clip_norm: 1.0
   lambda_minor: 1.0
   output_dir: artifacts/classifier
-
+  log_path: artifacts/classifier/train.jsonl
+  init_bert_checkpoint: null
+  resume_checkpoint: null

@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from traffic_bert.config import load_yaml
+from traffic_bert.data.cic import CicFlowLabelIndex
 from traffic_bert.data.pcap import PcapFlowExtractor
 from traffic_bert.data.schema import InputView, collect_pcap_files
 from traffic_bert.labels import LabelMap
@@ -23,6 +25,8 @@ class BuildConfig:
     split: str = "train"
     label_source: str = "filename"
     static_label: str | None = None
+    label_csv_path: Path | None = None
+    drop_unmatched_labels: bool = True
     views: tuple[InputView, ...] = (
         InputView.PAYLOAD_ONLY,
         InputView.FULL_PACKET,
@@ -43,29 +47,112 @@ def infer_source_label(path: Path, label_source: str, static_label: str | None =
         return path.stem
     if label_source == "parent_filename":
         return f"{path.parent.name}/{path.stem}"
+    if label_source == "cic_csv":
+        raise ValueError("cic_csv labels are resolved per flow, not per file")
     raise ValueError(f"unsupported label_source: {label_source}")
+
+
+def _parse_endpoint(endpoint: str) -> tuple[str, int]:
+    host, port = endpoint.rsplit(":", 1)
+    return host, int(port)
+
+
+def _source_label_for_flow(
+    config: BuildConfig,
+    pcap_path: Path,
+    flow_endpoint_a: str,
+    flow_endpoint_b: str,
+    protocol: str,
+    start_time: float,
+    cic_index: CicFlowLabelIndex | None,
+) -> str | None:
+    if config.label_source == "cic_csv":
+        if cic_index is None:
+            raise ValueError("label_source=cic_csv requires label_csv_path")
+        src_ip, src_port = _parse_endpoint(flow_endpoint_a)
+        dst_ip, dst_port = _parse_endpoint(flow_endpoint_b)
+        return cic_index.lookup(src_ip, dst_ip, src_port, dst_port, protocol)
+    return infer_source_label(pcap_path, config.label_source, config.static_label)
+
+
+def build_config_from_dict(raw: dict) -> list[BuildConfig]:
+    """Parse one or more BuildConfig entries from a YAML-ready mapping."""
+
+    common = raw.get("build", {})
+    entries = raw.get("datasets")
+    if entries is None:
+        entries = [raw]
+
+    configs: list[BuildConfig] = []
+    for item in entries:
+        merged = {**common, **item}
+        views = tuple(
+            InputView(value)
+            for value in merged.get(
+                "views",
+                ["payload_only", "full_packet", "masked_header_packet"],
+            )
+        )
+        configs.append(
+            BuildConfig(
+                input_path=Path(merged.get("input_path") or merged["raw_path"]),
+                output_path=Path(merged.get("output_path") or merged["processed_path"]),
+                label_map_path=Path(merged.get("label_map", raw.get("label_map", "configs/label_map.yaml"))),
+                source_dataset=merged.get("source_dataset", merged.get("dataset", "custom")),
+                split=merged.get("split", "train"),
+                label_source=merged.get("label_source", "filename"),
+                static_label=merged.get("static_label"),
+                label_csv_path=Path(merged["label_csv_path"])
+                if merged.get("label_csv_path")
+                else None,
+                drop_unmatched_labels=bool(merged.get("drop_unmatched_labels", True)),
+                views=views,
+                keep_empty_payload=bool(merged.get("keep_empty_payload", True)),
+                max_packets_per_flow=merged.get("max_packets_per_flow"),
+            )
+        )
+    return configs
+
+
+def build_config_from_yaml(path: str | Path) -> list[BuildConfig]:
+    return build_config_from_dict(load_yaml(path))
 
 
 def build_processed_dataset(config: BuildConfig) -> dict:
     label_map = LabelMap.from_yaml(config.label_map_path)
     extractor = PcapFlowExtractor(max_packets_per_flow=config.max_packets_per_flow)
+    cic_index = None
+    if config.label_source == "cic_csv":
+        if config.label_csv_path is None:
+            raise ValueError("label_source=cic_csv requires label_csv_path")
+        cic_index = CicFlowLabelIndex.from_frame(pd.read_csv(config.label_csv_path))
 
     rows: list[dict] = []
     raw_files = collect_pcap_files(config.input_path)
     for pcap_path in raw_files:
-        source_label = infer_source_label(pcap_path, config.label_source, config.static_label)
-        target = label_map.map_source_label(source_label)
         flows = extractor.extract(pcap_path)
 
         for flow in flows:
             if not config.keep_empty_payload and not flow.has_payload:
                 continue
+            source_label = _source_label_for_flow(
+                config=config,
+                pcap_path=pcap_path,
+                flow_endpoint_a=flow.endpoint_a,
+                flow_endpoint_b=flow.endpoint_b,
+                protocol=flow.protocol,
+                start_time=flow.start_time,
+                cic_index=cic_index,
+            )
+            if source_label is None and config.drop_unmatched_labels:
+                continue
+            target = label_map.map_source_label(source_label)
             for view in config.views:
                 rows.append(
                     flow.to_row(
                         view=view,
                         source_dataset=config.source_dataset,
-                        source_label=source_label,
+                        source_label=source_label or "UNMATCHED",
                         major_label=target.major_label,
                         minor_labels=list(target.minor_labels),
                         split=config.split,
@@ -113,4 +200,3 @@ def dataset_stats(frame: pd.DataFrame, raw_files: list[Path]) -> dict:
             "max": int(frame["packet_byte_length"].max()),
         },
     }
-

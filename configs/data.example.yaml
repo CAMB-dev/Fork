@@ -11,8 +11,15 @@ build:
   label_source: filename
   keep_empty_payload: true
   max_packets_per_flow: null
+  drop_unmatched_labels: true
 
 windowing:
   max_length: 512
   stride: 384
 
+datasets:
+  - dataset: custom
+    raw_path: data/raw/sample.pcap
+    processed_path: data/processed/train.parquet
+    split: train
+    label_source: filename

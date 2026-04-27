@@ -19,14 +19,21 @@ from traffic_bert.baselines import (
     train_major_baseline,
 )
 from traffic_bert.calibration import calibrate_thresholds
-from traffic_bert.data.build import BuildConfig, build_processed_dataset
+from traffic_bert.config import append_jsonl, load_yaml, set_seed, write_json
+from traffic_bert.data.build import BuildConfig, build_config_from_yaml, build_processed_dataset
 from traffic_bert.data.dataset import FlowWindowDataset, flow_collate
 from traffic_bert.data.pcap import PcapFlowExtractor
 from traffic_bert.data.schema import InputView
+from traffic_bert.data.split import assign_file_time_split, processed_stats
+from traffic_bert.data.validate import validation_summary
 from traffic_bert.inference import decode_hierarchical_prediction
 from traffic_bert.labels import LabelMap
 from traffic_bert.metrics import major_classification_metrics, multilabel_f1
+from traffic_bert.metrics_io import export_major_metrics
 from traffic_bert.models import (
+    ByteCnnClassifier,
+    ByteGruClassifier,
+    ByteTransformerClassifier,
     ByteBertForHierarchicalClassification,
     create_bert_config,
     create_mlm_model,
@@ -100,6 +107,8 @@ def build_data(
     ),
     keep_empty_payload: bool = typer.Option(True, help="Keep flows without L4 payload."),
     max_packets_per_flow: Optional[int] = typer.Option(None, help="Optional packet cap per flow."),
+    label_csv: Optional[Path] = typer.Option(None, help="CIC-style flow label CSV."),
+    drop_unmatched_labels: bool = typer.Option(True, help="Drop flows without matched labels."),
 ) -> None:
     """Build processed Parquet data from PCAP files."""
 
@@ -113,12 +122,82 @@ def build_data(
             split=split,
             label_source=label_source,
             static_label=static_label,
+            label_csv_path=label_csv,
+            drop_unmatched_labels=drop_unmatched_labels,
             views=selected_views,
             keep_empty_payload=keep_empty_payload,
             max_packets_per_flow=max_packets_per_flow,
         )
     )
     typer.echo(json.dumps(stats, ensure_ascii=False, indent=2))
+
+
+@data_app.command("build-config")
+def build_data_config(config: Path = typer.Option(..., help="YAML build config.")) -> None:
+    """Build one or more processed datasets from a YAML config."""
+
+    results = []
+    for build_config in build_config_from_yaml(config):
+        stats = build_processed_dataset(build_config)
+        results.append({"output_path": str(build_config.output_path), "stats": stats})
+    typer.echo(json.dumps(results, ensure_ascii=False, indent=2))
+
+
+@data_app.command("split")
+def split_data(
+    input_path: Path = typer.Option(..., help="Input processed Parquet."),
+    output_dir: Path = typer.Option(..., help="Directory for train/val/test Parquet files."),
+    group_column: str = typer.Option("source_file", help="Column kept within one split."),
+    train_ratio: float = typer.Option(0.7, help="Training split ratio."),
+    val_ratio: float = typer.Option(0.15, help="Validation split ratio."),
+) -> None:
+    """Assign stable group-wise train/val/test splits and write split Parquet files."""
+
+    frame = pd.read_parquet(input_path)
+    frame = assign_file_time_split(
+        frame,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        group_column=group_column,
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for split_name in ["train", "val", "test"]:
+        frame[frame["split"] == split_name].to_parquet(output_dir / f"{split_name}.parquet", index=False)
+    stats = processed_stats(frame)
+    write_json(output_dir / "split.stats.json", stats)
+    typer.echo(json.dumps(stats, ensure_ascii=False, indent=2))
+
+
+@data_app.command("stats")
+def data_stats(
+    input_path: Path = typer.Option(..., help="Input processed Parquet."),
+    output_dir: Optional[Path] = typer.Option(None, help="Optional output directory."),
+) -> None:
+    """Generate processed-data statistics and optional class distribution CSV."""
+
+    frame = pd.read_parquet(input_path)
+    stats = processed_stats(frame)
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        write_json(output_dir / "stats.json", stats)
+        distribution = (
+            frame.groupby(["split", "view", "major_label"], dropna=False)
+            .size()
+            .reset_index(name="count")
+        )
+        distribution.to_csv(output_dir / "class_distribution.csv", index=False)
+    typer.echo(json.dumps(stats, ensure_ascii=False, indent=2))
+
+
+@data_app.command("validate")
+def validate_data(input_path: Path = typer.Option(..., help="Input processed Parquet.")) -> None:
+    """Validate processed-data schema and common quality issues."""
+
+    frame = pd.read_parquet(input_path)
+    summary = validation_summary(frame)
+    typer.echo(json.dumps(summary, ensure_ascii=False, indent=2))
+    if not summary["ok"]:
+        raise typer.Exit(code=1)
 
 
 def _make_classifier(
@@ -144,6 +223,89 @@ def _make_classifier(
     )
 
 
+def _make_neural_baseline(
+    model_name: str,
+    vocab_size: int,
+    num_labels: int,
+    hidden_size: int,
+    max_length: int,
+) -> torch.nn.Module:
+    if model_name == "cnn":
+        return ByteCnnClassifier(vocab_size=vocab_size, num_labels=num_labels, hidden_size=hidden_size)
+    if model_name == "gru":
+        return ByteGruClassifier(vocab_size=vocab_size, num_labels=num_labels, hidden_size=hidden_size)
+    if model_name == "transformer":
+        return ByteTransformerClassifier(
+            vocab_size=vocab_size,
+            num_labels=num_labels,
+            hidden_size=hidden_size,
+            max_length=max_length,
+        )
+    raise ValueError(f"unsupported neural baseline: {model_name}")
+
+
+def _train_neural_baseline_epoch(
+    model: torch.nn.Module,
+    dataloader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+) -> dict[str, float]:
+    model.train()
+    total_loss = 0.0
+    steps = 0
+    for batch in dataloader:
+        optimizer.zero_grad(set_to_none=True)
+        logits = model(
+            batch["input_ids"].to(device),
+            batch["attention_mask"].to(device),
+        )
+        loss = torch.nn.functional.cross_entropy(logits, batch["major_labels"].to(device))
+        loss.backward()
+        optimizer.step()
+        total_loss += float(loss.detach().cpu())
+        steps += 1
+    return {"loss": total_loss / max(steps, 1)}
+
+
+@torch.no_grad()
+def _eval_neural_baseline(
+    model: torch.nn.Module,
+    data_path: Path,
+    label_map: LabelMap,
+    view: str,
+    batch_size: int,
+    max_length: int,
+    stride: int,
+    max_windows: Optional[int],
+    device: torch.device,
+    output_dir: Optional[Path] = None,
+) -> dict:
+    dataset = FlowWindowDataset.from_parquet(
+        data_path,
+        label_map=label_map,
+        view=view,
+        max_length=max_length,
+        stride=stride,
+        max_windows=max_windows,
+    )
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=flow_collate)
+    model.eval()
+    y_true = []
+    y_pred = []
+    for batch in loader:
+        logits = model(
+            batch["input_ids"].to(device),
+            batch["attention_mask"].to(device),
+        )
+        y_true.extend(batch["major_labels"].tolist())
+        y_pred.extend(logits.argmax(dim=-1).cpu().tolist())
+    metrics = major_classification_metrics(y_true, y_pred, label_map.major_labels)
+    if output_dir is not None:
+        export_major_metrics(output_dir, metrics, y_true, y_pred, label_map.major_labels)
+        write_json(output_dir / "metrics.json", metrics)
+    return metrics
+
+
 def _load_classifier(
     checkpoint: Path,
     label_map: LabelMap,
@@ -163,6 +325,70 @@ def _load_classifier(
     return model
 
 
+def _load_thresholds(path: Optional[Path]) -> dict[str, float] | None:
+    if path is None:
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if "thresholds" in payload:
+        return {str(key): float(value) for key, value in payload["thresholds"].items()}
+    return {str(key): float(value) for key, value in payload.items()}
+
+
+def _load_bert_encoder_from_mlm(
+    model: ByteBertForHierarchicalClassification,
+    checkpoint: Path,
+) -> None:
+    payload = torch.load(checkpoint, map_location="cpu")
+    state = payload["model_state_dict"]
+    bert_state = {
+        key.removeprefix("bert."): value
+        for key, value in state.items()
+        if key.startswith("bert.")
+    }
+    missing, unexpected = model.bert.load_state_dict(bert_state, strict=False)
+    if unexpected:
+        raise ValueError(f"unexpected BERT keys when loading MLM checkpoint: {unexpected}")
+    # Pooler weights may be missing depending on the source checkpoint; that is acceptable.
+    non_pooler_missing = [key for key in missing if not key.startswith("pooler.")]
+    if non_pooler_missing:
+        raise ValueError(f"missing BERT keys when loading MLM checkpoint: {non_pooler_missing}")
+
+
+def _evaluate_classifier_model(
+    model: ByteBertForHierarchicalClassification,
+    data_path: Path,
+    label_map: LabelMap,
+    view: str,
+    batch_size: int,
+    max_length: int,
+    stride: int,
+    max_windows: Optional[int],
+    device: torch.device,
+    output_dir: Optional[Path] = None,
+) -> dict:
+    dataset = FlowWindowDataset.from_parquet(
+        data_path,
+        label_map=label_map,
+        view=view,
+        max_length=max_length,
+        stride=stride,
+        max_windows=max_windows,
+    )
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=flow_collate)
+    outputs = collect_classifier_outputs(model, loader, device)
+    y_true = outputs["major_labels"].numpy()
+    y_pred = outputs["major_logits"].argmax(dim=-1).numpy()
+    metrics = major_classification_metrics(y_true, y_pred, label_map.major_labels)
+    metrics["minor"] = multilabel_f1(
+        outputs["minor_labels"].numpy(),
+        torch.sigmoid(outputs["minor_logits"]).numpy(),
+    )
+    if output_dir is not None:
+        export_major_metrics(output_dir, metrics, y_true.tolist(), y_pred.tolist(), label_map.major_labels)
+        write_json(output_dir / "metrics.json", metrics)
+    return metrics
+
+
 @train_app.command("classifier")
 def train_classifier(
     train_path: Path = typer.Option(..., help="Training Parquet file."),
@@ -177,9 +403,14 @@ def train_classifier(
     stride: int = typer.Option(384, help="Sliding window stride."),
     max_windows: Optional[int] = typer.Option(8, help="Max windows per flow."),
     device: str = typer.Option("auto", help="auto, cpu, or cuda."),
+    seed: int = typer.Option(42, help="Random seed."),
+    log_path: Optional[Path] = typer.Option(None, help="Optional JSONL training log."),
+    resume_checkpoint: Optional[Path] = typer.Option(None, help="Resume model weights."),
+    init_bert_checkpoint: Optional[Path] = typer.Option(None, help="MLM checkpoint for BERT init."),
 ) -> None:
     """Train the hierarchical classifier."""
 
+    set_seed(seed)
     label_map = LabelMap.from_yaml(label_map_path)
     train_dataset = FlowWindowDataset.from_parquet(
         train_path,
@@ -197,44 +428,69 @@ def train_classifier(
     )
 
     model = _make_classifier(label_map, max_position_embeddings=max_length)
+    if init_bert_checkpoint is not None:
+        _load_bert_encoder_from_mlm(model, init_bert_checkpoint)
+    if resume_checkpoint is not None:
+        payload = torch.load(resume_checkpoint, map_location="cpu")
+        model.load_state_dict(payload["model_state_dict"])
     device_obj = resolve_device(device)
     model.to(device_obj)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
     history = []
+    best_macro_f1 = -1.0
+    output_dir.mkdir(parents=True, exist_ok=True)
     for epoch in range(epochs):
         metrics = train_classifier_epoch(model, train_loader, optimizer, device_obj)
         metrics["epoch"] = epoch + 1
+        eval_metrics = None
+        if val_path is not None:
+            eval_metrics = _evaluate_classifier_model(
+                model=model,
+                data_path=val_path,
+                label_map=label_map,
+                view=view,
+                batch_size=batch_size,
+                max_length=max_length,
+                stride=stride,
+                max_windows=max_windows,
+                device=device_obj,
+                output_dir=output_dir / "eval",
+            )
+            metrics["val_macro_f1"] = eval_metrics["macro_f1"]
+            if eval_metrics["macro_f1"] > best_macro_f1:
+                best_macro_f1 = eval_metrics["macro_f1"]
+                save_checkpoint(
+                    output_dir / "classifier.best.pt",
+                    model,
+                    extra={
+                        "label_map": label_map.as_dict(),
+                        "epoch": epoch + 1,
+                        "eval_metrics": eval_metrics,
+                        "model_config": model.bert.config.to_dict(),
+                    },
+                )
         history.append(metrics)
+        if log_path is not None:
+            append_jsonl(log_path, metrics)
         typer.echo(json.dumps(metrics, indent=2))
 
     eval_metrics = None
     if val_path is not None:
-        val_dataset = FlowWindowDataset.from_parquet(
-            val_path,
+        eval_metrics = _evaluate_classifier_model(
+            model=model,
+            data_path=val_path,
             label_map=label_map,
             view=view,
+            batch_size=batch_size,
             max_length=max_length,
             stride=stride,
             max_windows=max_windows,
-        )
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            collate_fn=flow_collate,
-        )
-        outputs = collect_classifier_outputs(model, val_loader, device_obj)
-        y_true = outputs["major_labels"].numpy()
-        y_pred = outputs["major_logits"].argmax(dim=-1).numpy()
-        eval_metrics = major_classification_metrics(y_true, y_pred, label_map.major_labels)
-        eval_metrics["minor"] = multilabel_f1(
-            outputs["minor_labels"].numpy(),
-            torch.sigmoid(outputs["minor_logits"]).numpy(),
+            device=device_obj,
+            output_dir=output_dir / "eval",
         )
         typer.echo(json.dumps(eval_metrics, ensure_ascii=False, indent=2))
 
-    output_dir.mkdir(parents=True, exist_ok=True)
     save_checkpoint(
         output_dir / "classifier.pt",
         model,
@@ -243,7 +499,39 @@ def train_classifier(
             "history": history,
             "eval_metrics": eval_metrics,
             "model_config": model.bert.config.to_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
         },
+    )
+
+
+@train_app.command("classifier-config")
+def train_classifier_config(config: Path = typer.Option(..., help="Classifier train YAML.")) -> None:
+    """Train the classifier from a YAML config file."""
+
+    raw = load_yaml(config)
+    train_cfg = raw.get("train", {})
+    data_cfg = raw.get("data", {})
+    train_classifier(
+        train_path=Path(data_cfg["train_path"]),
+        output_dir=Path(train_cfg.get("output_dir", "artifacts/classifier")),
+        label_map_path=Path(data_cfg.get("label_map", "configs/label_map.yaml")),
+        val_path=Path(data_cfg["val_path"]) if data_cfg.get("val_path") else None,
+        view=data_cfg.get("view", "masked_header_packet"),
+        epochs=int(train_cfg.get("epochs", 3)),
+        batch_size=int(train_cfg.get("batch_size", 4)),
+        learning_rate=float(train_cfg.get("learning_rate", 3e-5)),
+        max_length=int(data_cfg.get("max_length", 512)),
+        stride=int(data_cfg.get("stride", 384)),
+        max_windows=data_cfg.get("max_windows", 8),
+        device=raw.get("device", "auto"),
+        seed=int(raw.get("seed", 42)),
+        log_path=Path(train_cfg["log_path"]) if train_cfg.get("log_path") else None,
+        resume_checkpoint=Path(train_cfg["resume_checkpoint"])
+        if train_cfg.get("resume_checkpoint")
+        else None,
+        init_bert_checkpoint=Path(train_cfg["init_bert_checkpoint"])
+        if train_cfg.get("init_bert_checkpoint")
+        else None,
     )
 
 
@@ -260,9 +548,13 @@ def train_mlm(
     stride: int = typer.Option(384, help="Sliding window stride."),
     max_windows: Optional[int] = typer.Option(8, help="Max windows per flow."),
     device: str = typer.Option("auto", help="auto, cpu, or cuda."),
+    seed: int = typer.Option(42, help="Random seed."),
+    log_path: Optional[Path] = typer.Option(None, help="Optional JSONL training log."),
+    resume_checkpoint: Optional[Path] = typer.Option(None, help="Resume MLM checkpoint."),
 ) -> None:
     """Run MLM pretraining on processed flow data."""
 
+    set_seed(seed)
     label_map = LabelMap.from_yaml(label_map_path)
     tokenizer = ByteTokenizer()
     dataset = FlowWindowDataset.from_parquet(
@@ -276,6 +568,9 @@ def train_mlm(
     )
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=flow_collate)
     model = create_mlm_model(max_position_embeddings=max_length)
+    if resume_checkpoint is not None:
+        payload = torch.load(resume_checkpoint, map_location="cpu")
+        model.load_state_dict(payload["model_state_dict"])
     device_obj = resolve_device(device)
     model.to(device_obj)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
@@ -293,6 +588,8 @@ def train_mlm(
     }
 
     history = []
+    best_loss = float("inf")
+    output_dir.mkdir(parents=True, exist_ok=True)
     for epoch in range(epochs):
         metrics = train_mlm_epoch(
             model=model,
@@ -305,13 +602,152 @@ def train_mlm(
         )
         metrics["epoch"] = epoch + 1
         history.append(metrics)
+        if log_path is not None:
+            append_jsonl(log_path, metrics)
+        if metrics["loss"] < best_loss:
+            best_loss = metrics["loss"]
+            save_checkpoint(
+                output_dir / "mlm.best.pt",
+                model,
+                extra={
+                    "history": history,
+                    "epoch": epoch + 1,
+                    "model_config": model.config.to_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                },
+            )
         typer.echo(json.dumps(metrics, indent=2))
 
-    output_dir.mkdir(parents=True, exist_ok=True)
     save_checkpoint(
         output_dir / "mlm.pt",
         model,
-        extra={"history": history, "model_config": model.config.to_dict()},
+        extra={
+            "history": history,
+            "model_config": model.config.to_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+        },
+    )
+
+
+@train_app.command("mlm-config")
+def train_mlm_config(config: Path = typer.Option(..., help="MLM train YAML.")) -> None:
+    """Train MLM from a YAML config file."""
+
+    raw = load_yaml(config)
+    train_cfg = raw.get("train", {})
+    data_cfg = raw.get("data", {})
+    train_mlm(
+        train_path=Path(data_cfg["train_path"]),
+        output_dir=Path(train_cfg.get("output_dir", "artifacts/mlm")),
+        label_map_path=Path(data_cfg.get("label_map", "configs/label_map.yaml")),
+        view=data_cfg.get("view", "masked_header_packet"),
+        epochs=int(train_cfg.get("epochs", 1)),
+        batch_size=int(train_cfg.get("batch_size", 4)),
+        learning_rate=float(train_cfg.get("learning_rate", 5e-5)),
+        max_length=int(data_cfg.get("max_length", 512)),
+        stride=int(data_cfg.get("stride", 384)),
+        max_windows=data_cfg.get("max_windows", 8),
+        device=raw.get("device", "auto"),
+        seed=int(raw.get("seed", 42)),
+        log_path=Path(train_cfg["log_path"]) if train_cfg.get("log_path") else None,
+        resume_checkpoint=Path(train_cfg["resume_checkpoint"])
+        if train_cfg.get("resume_checkpoint")
+        else None,
+    )
+
+
+@train_app.command("neural-baseline")
+def train_neural_baseline(
+    train_path: Path = typer.Option(..., help="Training Parquet file."),
+    output_dir: Path = typer.Option(Path("artifacts/neural_baseline"), help="Output directory."),
+    label_map_path: Path = typer.Option(Path("configs/label_map.yaml"), help="Label map YAML."),
+    val_path: Optional[Path] = typer.Option(None, help="Optional validation Parquet file."),
+    view: str = typer.Option("payload_only", help="Input view."),
+    model_name: str = typer.Option("cnn", "--model", help="cnn, gru, or transformer."),
+    epochs: int = typer.Option(3, help="Number of epochs."),
+    batch_size: int = typer.Option(8, help="Batch size."),
+    learning_rate: float = typer.Option(1e-3, help="Learning rate."),
+    hidden_size: int = typer.Option(128, help="Embedding/hidden size."),
+    max_length: int = typer.Option(512, help="BERT-style max sequence length."),
+    stride: int = typer.Option(384, help="Sliding window stride."),
+    max_windows: Optional[int] = typer.Option(4, help="Max windows per flow."),
+    device: str = typer.Option("auto", help="auto, cpu, or cuda."),
+    seed: int = typer.Option(42, help="Random seed."),
+    log_path: Optional[Path] = typer.Option(None, help="Optional JSONL training log."),
+) -> None:
+    """Train a neural major-label baseline."""
+
+    set_seed(seed)
+    tokenizer = ByteTokenizer()
+    label_map = LabelMap.from_yaml(label_map_path)
+    dataset = FlowWindowDataset.from_parquet(
+        train_path,
+        label_map=label_map,
+        view=view,
+        max_length=max_length,
+        stride=stride,
+        max_windows=max_windows,
+    )
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=flow_collate)
+    model = _make_neural_baseline(
+        model_name=model_name,
+        vocab_size=tokenizer.vocab_size,
+        num_labels=len(label_map.major_labels),
+        hidden_size=hidden_size,
+        max_length=max_length,
+    )
+    device_obj = resolve_device(device)
+    model.to(device_obj)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    history = []
+    best_macro_f1 = -1.0
+    for epoch in range(epochs):
+        metrics = _train_neural_baseline_epoch(model, loader, optimizer, device_obj)
+        metrics["epoch"] = epoch + 1
+        if val_path is not None:
+            eval_metrics = _eval_neural_baseline(
+                model=model,
+                data_path=val_path,
+                label_map=label_map,
+                view=view,
+                batch_size=batch_size,
+                max_length=max_length,
+                stride=stride,
+                max_windows=max_windows,
+                device=device_obj,
+                output_dir=output_dir / "eval",
+            )
+            metrics["val_macro_f1"] = eval_metrics["macro_f1"]
+            if eval_metrics["macro_f1"] > best_macro_f1:
+                best_macro_f1 = eval_metrics["macro_f1"]
+                torch.save(
+                    {
+                        "model_state_dict": model.state_dict(),
+                        "model_name": model_name,
+                        "hidden_size": hidden_size,
+                        "max_length": max_length,
+                        "label_map": label_map.as_dict(),
+                        "eval_metrics": eval_metrics,
+                    },
+                    output_dir / "neural_baseline.best.pt",
+                )
+        history.append(metrics)
+        if log_path is not None:
+            append_jsonl(log_path, metrics)
+        typer.echo(json.dumps(metrics, ensure_ascii=False, indent=2))
+
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "model_name": model_name,
+            "hidden_size": hidden_size,
+            "max_length": max_length,
+            "history": history,
+            "label_map": label_map.as_dict(),
+        },
+        output_dir / "neural_baseline.pt",
     )
 
 
@@ -326,29 +762,66 @@ def eval_classifier(
     stride: int = typer.Option(384, help="Sliding window stride."),
     max_windows: Optional[int] = typer.Option(8, help="Max windows per flow."),
     device: str = typer.Option("auto", help="auto, cpu, or cuda."),
+    output_dir: Optional[Path] = typer.Option(None, help="Optional metrics output directory."),
 ) -> None:
     """Evaluate a classifier checkpoint."""
 
     label_map = LabelMap.from_yaml(label_map_path)
-    dataset = FlowWindowDataset.from_parquet(
-        data_path,
-        label_map=label_map,
-        view=view,
-        max_length=max_length,
-        stride=stride,
-        max_windows=max_windows,
-    )
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=flow_collate)
     model = _load_classifier(checkpoint, label_map, max_length)
     device_obj = resolve_device(device)
     model.to(device_obj)
-    outputs = collect_classifier_outputs(model, loader, device_obj)
-    y_true = outputs["major_labels"].numpy()
-    y_pred = outputs["major_logits"].argmax(dim=-1).numpy()
-    metrics = major_classification_metrics(y_true, y_pred, label_map.major_labels)
-    metrics["minor"] = multilabel_f1(
-        outputs["minor_labels"].numpy(),
-        torch.sigmoid(outputs["minor_logits"]).numpy(),
+    metrics = _evaluate_classifier_model(
+        model=model,
+        data_path=data_path,
+        label_map=label_map,
+        view=view,
+        batch_size=batch_size,
+        max_length=max_length,
+        stride=stride,
+        max_windows=max_windows,
+        device=device_obj,
+        output_dir=output_dir,
+    )
+    typer.echo(json.dumps(metrics, ensure_ascii=False, indent=2))
+
+
+@eval_app.command("neural-baseline")
+def eval_neural_baseline(
+    data_path: Path = typer.Option(..., help="Evaluation Parquet file."),
+    checkpoint: Path = typer.Option(..., help="Neural baseline checkpoint."),
+    label_map_path: Path = typer.Option(Path("configs/label_map.yaml"), help="Label map YAML."),
+    view: str = typer.Option("payload_only", help="Input view."),
+    batch_size: int = typer.Option(8, help="Batch size."),
+    stride: int = typer.Option(384, help="Sliding window stride."),
+    max_windows: Optional[int] = typer.Option(4, help="Max windows per flow."),
+    device: str = typer.Option("auto", help="auto, cpu, or cuda."),
+    output_dir: Optional[Path] = typer.Option(None, help="Optional metrics output directory."),
+) -> None:
+    """Evaluate a neural baseline checkpoint."""
+
+    label_map = LabelMap.from_yaml(label_map_path)
+    payload = torch.load(checkpoint, map_location="cpu")
+    model = _make_neural_baseline(
+        model_name=payload["model_name"],
+        vocab_size=ByteTokenizer().vocab_size,
+        num_labels=len(label_map.major_labels),
+        hidden_size=int(payload["hidden_size"]),
+        max_length=int(payload["max_length"]),
+    )
+    model.load_state_dict(payload["model_state_dict"])
+    device_obj = resolve_device(device)
+    model.to(device_obj)
+    metrics = _eval_neural_baseline(
+        model=model,
+        data_path=data_path,
+        label_map=label_map,
+        view=view,
+        batch_size=batch_size,
+        max_length=int(payload["max_length"]),
+        stride=stride,
+        max_windows=max_windows,
+        device=device_obj,
+        output_dir=output_dir,
     )
     typer.echo(json.dumps(metrics, ensure_ascii=False, indent=2))
 
@@ -407,6 +880,8 @@ def predict_hex(
     max_length: int = typer.Option(512, help="BERT max sequence length."),
     stride: int = typer.Option(384, help="Sliding window stride."),
     device: str = typer.Option("auto", help="auto, cpu, or cuda."),
+    thresholds: Optional[Path] = typer.Option(None, help="Minor threshold JSON file."),
+    output: Optional[Path] = typer.Option(None, help="Optional prediction JSON path."),
 ) -> None:
     """Predict one hex payload as a single forward packet."""
 
@@ -437,8 +912,12 @@ def predict_hex(
         outputs["major_logits"][0].cpu(),
         outputs["minor_logits"][0].cpu(),
         label_map,
+        thresholds=_load_thresholds(thresholds),
     )
-    typer.echo(json.dumps(prediction.as_dict(), ensure_ascii=False, indent=2))
+    payload = prediction.as_dict()
+    if output is not None:
+        write_json(output, payload)
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 @predict_app.command("pcap")
@@ -451,6 +930,8 @@ def predict_pcap(
     stride: int = typer.Option(384, help="Sliding window stride."),
     max_packets_per_flow: Optional[int] = typer.Option(None, help="Optional packet cap per flow."),
     device: str = typer.Option("auto", help="auto, cpu, or cuda."),
+    thresholds: Optional[Path] = typer.Option(None, help="Minor threshold JSON file."),
+    output: Optional[Path] = typer.Option(None, help="Optional JSONL output path."),
 ) -> None:
     """Predict all reconstructed TCP/UDP flows from a PCAP file."""
 
@@ -462,8 +943,13 @@ def predict_pcap(
     device_obj = resolve_device(device)
     model.to(device_obj)
     model.eval()
+    loaded_thresholds = _load_thresholds(thresholds)
 
     predictions = []
+    output_handle = None
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output_handle = open(output, "w", encoding="utf-8")
     for flow in flows:
         chunks = [
             PacketChunk(direction=packet.direction, data=packet.bytes_for_view(input_view))
@@ -488,6 +974,7 @@ def predict_pcap(
             outputs["major_logits"][0].cpu(),
             outputs["minor_logits"][0].cpu(),
             label_map,
+            thresholds=loaded_thresholds,
         )
         item = prediction.as_dict()
         item.update(
@@ -500,7 +987,11 @@ def predict_pcap(
             }
         )
         predictions.append(item)
+        if output_handle is not None:
+            output_handle.write(json.dumps(item, ensure_ascii=False) + "\n")
 
+    if output_handle is not None:
+        output_handle.close()
     typer.echo(json.dumps(predictions, ensure_ascii=False, indent=2))
 
 

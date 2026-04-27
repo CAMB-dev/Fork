@@ -75,9 +75,16 @@ data/
 uv run traffic-bert version
 uv run traffic-bert vocab write artifacts/vocab.txt
 uv run traffic-bert data build --input-path data/raw/sample.pcap --output-path data/processed/train.parquet --source-dataset custom --label-source filename
+uv run traffic-bert data build-config --config configs/data.example.yaml
+uv run traffic-bert data split --input-path data/processed/all.parquet --output-dir data/processed/split
+uv run traffic-bert data stats --input-path data/processed/train.parquet --output-dir artifacts/data_stats
+uv run traffic-bert data validate --input-path data/processed/train.parquet
 uv run traffic-bert train mlm --train-path data/processed/train.parquet
 uv run traffic-bert train classifier --train-path data/processed/train.parquet --val-path data/processed/val.parquet
+uv run traffic-bert train classifier-config --config configs/train.classifier.yaml
+uv run traffic-bert train neural-baseline --train-path data/processed/train.parquet --model cnn
 uv run traffic-bert eval classifier --data-path data/processed/test.parquet --checkpoint artifacts/classifier/classifier.pt
+uv run traffic-bert eval neural-baseline --data-path data/processed/test.parquet --checkpoint artifacts/neural_baseline/neural_baseline.pt
 uv run traffic-bert eval calibrate-thresholds --data-path data/processed/val.parquet --checkpoint artifacts/classifier/classifier.pt
 uv run traffic-bert baseline train --train-path data/processed/train.parquet --val-path data/processed/val.parquet
 uv run traffic-bert predict hex "474554202f20485454502f312e31" --checkpoint artifacts/classifier/classifier.pt
