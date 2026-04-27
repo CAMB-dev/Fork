@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import torch
 from torch.utils.data import DataLoader
 import typer
@@ -23,6 +25,7 @@ from traffic_bert.config import append_jsonl, load_yaml, set_seed, write_json
 from traffic_bert.data.build import BuildConfig, build_config_from_yaml, build_processed_dataset
 from traffic_bert.data.dataset import FlowWindowDataset, flow_collate
 from traffic_bert.data.pcap import PcapFlowExtractor
+from traffic_bert.data.payload_csv import PayloadCsvBuildConfig, build_payload_csv_dataset
 from traffic_bert.data.schema import InputView
 from traffic_bert.data.split import assign_file_time_split, processed_stats
 from traffic_bert.data.validate import validation_summary
@@ -143,6 +146,40 @@ def build_data_config(config: Path = typer.Option(..., help="YAML build config."
     typer.echo(json.dumps(results, ensure_ascii=False, indent=2))
 
 
+@data_app.command("build-payload-csv")
+def build_payload_csv(
+    input_path: Path = typer.Option(..., help="Payload-Byte style CSV file."),
+    output_path: Path = typer.Option(..., help="Output Parquet path."),
+    label_map: Path = typer.Option(Path("configs/label_map.yaml"), help="Label map YAML."),
+    source_dataset: str = typer.Option("payload-byte", help="Dataset name stored in rows."),
+    split: str = typer.Option("train", help="Split name stored in rows."),
+    label_column: str = typer.Option("label", help="CSV label column."),
+    byte_prefix: str = typer.Option("payload_byte_", help="Prefix of byte columns."),
+    chunksize: int = typer.Option(20_000, help="Rows read per CSV chunk."),
+    keep_empty_payload: bool = typer.Option(False, help="Keep rows with all-zero payload bytes."),
+    trim_trailing_zeros: bool = typer.Option(True, help="Trim zero padding at payload tail."),
+    compression: str = typer.Option("zstd", help="Parquet compression codec."),
+) -> None:
+    """Build processed Parquet data from Payload-Byte packet CSV files."""
+
+    stats = build_payload_csv_dataset(
+        PayloadCsvBuildConfig(
+            input_path=input_path,
+            output_path=output_path,
+            label_map_path=label_map,
+            source_dataset=source_dataset,
+            split=split,
+            label_column=label_column,
+            byte_prefix=byte_prefix,
+            chunksize=chunksize,
+            keep_empty_payload=keep_empty_payload,
+            trim_trailing_zeros=trim_trailing_zeros,
+            compression=compression,
+        )
+    )
+    typer.echo(json.dumps(stats, ensure_ascii=False, indent=2))
+
+
 @data_app.command("split")
 def split_data(
     input_path: Path = typer.Option(..., help="Input processed Parquet."),
@@ -166,6 +203,40 @@ def split_data(
     stats = processed_stats(frame)
     write_json(output_dir / "split.stats.json", stats)
     typer.echo(json.dumps(stats, ensure_ascii=False, indent=2))
+
+
+@data_app.command("merge")
+def merge_data(
+    input_paths: list[Path] = typer.Option(..., "--input-path", help="Input Parquet path."),
+    output_path: Path = typer.Option(..., help="Merged output Parquet path."),
+    compression: str = typer.Option("zstd", help="Parquet compression codec."),
+) -> None:
+    """Merge multiple processed Parquet files with the same schema."""
+
+    if not input_paths:
+        raise typer.BadParameter("at least one --input-path is required")
+    tables = [pq.read_table(path) for path in input_paths]
+    table = pa.concat_tables(tables, promote_options="default")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, output_path, compression=compression)
+
+    stats_columns = [
+        column
+        for column in [
+            "flow_id",
+            "split",
+            "view",
+            "major_label",
+            "source_dataset",
+            "packet_count",
+            "payload_byte_length",
+            "packet_byte_length",
+        ]
+        if column in table.column_names
+    ]
+    stats = processed_stats(table.select(stats_columns).to_pandas())
+    result = {"output_path": str(output_path), **stats}
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 @data_app.command("stats")

@@ -66,11 +66,25 @@ def test_data_stats_validate_split_cli(tmp_path: Path) -> None:
     stats_result = runner.invoke(app, ["data", "stats", "--input-path", str(parquet), "--output-dir", str(out_dir)])
     validate_result = runner.invoke(app, ["data", "validate", "--input-path", str(parquet)])
     split_result = runner.invoke(app, ["data", "split", "--input-path", str(parquet), "--output-dir", str(out_dir / "split")])
+    merge_result = runner.invoke(
+        app,
+        [
+            "data",
+            "merge",
+            "--input-path",
+            str(out_dir / "split" / "train.parquet"),
+            "--input-path",
+            str(out_dir / "split" / "test.parquet"),
+            "--output-path",
+            str(out_dir / "merged.parquet"),
+        ],
+    )
 
     assert stats_result.exit_code == 0
     assert validate_result.exit_code == 0
     assert split_result.exit_code == 0
+    assert merge_result.exit_code == 0
     assert (out_dir / "stats.json").exists()
     assert (out_dir / "class_distribution.csv").exists()
     assert (out_dir / "split" / "train.parquet").exists()
-
+    assert (out_dir / "merged.parquet").exists()

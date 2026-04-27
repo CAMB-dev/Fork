@@ -155,6 +155,30 @@ Malware/<family>.pcap
 - benign app -> `major_label=benign`
 - malware family -> `major_label=botnet_malware`，`minor_labels=[family]`
 
+### Payload-Byte CSV
+
+Payload-Byte 文件已经把每条样本整理成固定长度的 packet payload byte 列：
+
+```text
+payload_byte_1 ... payload_byte_1500, ttl, total_len, protocol, t_delta, label
+```
+
+这类数据不含完整五元组和双向 flow 边界，因此不能作为 flow 级主实验的严格替代。当前处理策略是：
+
+- 每一行转换为一个单包 `payload_only` 样本。
+- 去掉尾部零填充，保留 payload 内部的零字节。
+- 默认丢弃全零 payload 行。
+- `flow_id` 使用数据集名和原 CSV 行号生成，保证可复现。
+- 标签仍通过统一 `configs/label_map.yaml` 映射到大类和细类。
+
+对应命令：
+
+```powershell
+uv run traffic-bert data build-payload-csv --input-path data/raw/Payload-Byte/Payload_data_CICIDS2017.csv --output-path data/processed/payload_byte/cicids2017.parquet --source-dataset payload-byte-cicids2017
+uv run traffic-bert data split --input-path data/processed/payload_byte/cicids2017.parquet --output-dir data/processed/payload_byte/cicids2017_split --group-column flow_id
+uv run traffic-bert data merge --input-path data/processed/payload_byte/cicids2017_split/train.parquet --input-path data/processed/payload_byte/unsw_split/train.parquet --output-path data/processed/payload_byte/split/train.parquet
+```
+
 ## 7. 标签统一
 
 统一标签分两层：
@@ -287,4 +311,3 @@ bytes: binary
 - train/val/test 分布。
 
 这些统计既用于调试，也可作为论文数据集章节的表格来源。
-

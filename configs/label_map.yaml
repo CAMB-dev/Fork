@@ -12,6 +12,7 @@ major_labels:
 minor_labels:
   benign: []
   dos_ddos:
+    - dos
     - ddos
     - dos_hulk
     - dos_goldeneye
@@ -28,6 +29,7 @@ minor_labels:
   botnet_malware:
     - botnet
     - malware
+    - backdoor
     - cridex
     - geodo
     - htbot
@@ -35,17 +37,24 @@ minor_labels:
     - neris
     - nsis
     - shifu
+    - shellcode
     - tinba
     - virut
+    - worms
     - zeus
   scan:
     - portscan
+    - reconnaissance
     - scan
   infiltration:
     - infiltration
   heartbleed:
     - heartbleed
   other_attack:
+    - analysis_attack
+    - exploit
+    - fuzzing
+    - generic_attack
     - other_attack
 
 mappings:
@@ -67,13 +76,19 @@ mappings:
   - pattern: "DoS Slowhttptest|DoS slowhttptest"
     major_label: dos_ddos
     minor_labels: ["dos_slowhttptest"]
+  - pattern: "^DoS$"
+    major_label: dos_ddos
+    minor_labels: ["dos"]
   - pattern: "FTP-Patator"
     major_label: bruteforce
     minor_labels: ["ftp_patator"]
   - pattern: "SSH-Patator"
     major_label: bruteforce
     minor_labels: ["ssh_patator"]
-  - pattern: "Brute Force|Bruteforce|Web Attack - Brute Force"
+  - pattern: "Web Attack.*Brute Force"
+    major_label: web_attack
+    minor_labels: ["web_bruteforce"]
+  - pattern: "^Brute Force$|Bruteforce"
     major_label: bruteforce
     minor_labels: ["brute_force"]
   - pattern: "Web Attack - Sql Injection|SQL Injection"
@@ -88,6 +103,9 @@ mappings:
   - pattern: "PortScan|Port Scan"
     major_label: scan
     minor_labels: ["portscan"]
+  - pattern: "^Reconnaissance$"
+    major_label: scan
+    minor_labels: ["reconnaissance"]
   - pattern: "Infiltration"
     major_label: infiltration
     minor_labels: ["infiltration"]
@@ -97,6 +115,9 @@ mappings:
   - pattern: "Cridex"
     major_label: botnet_malware
     minor_labels: ["cridex"]
+  - pattern: "^Backdoor$"
+    major_label: botnet_malware
+    minor_labels: ["backdoor"]
   - pattern: "Geodo"
     major_label: botnet_malware
     minor_labels: ["geodo"]
@@ -115,17 +136,34 @@ mappings:
   - pattern: "Shifu"
     major_label: botnet_malware
     minor_labels: ["shifu"]
+  - pattern: "^Shellcode$"
+    major_label: botnet_malware
+    minor_labels: ["shellcode"]
   - pattern: "Tinba"
     major_label: botnet_malware
     minor_labels: ["tinba"]
   - pattern: "Virut"
     major_label: botnet_malware
     minor_labels: ["virut"]
+  - pattern: "^Worms$"
+    major_label: botnet_malware
+    minor_labels: ["worms"]
   - pattern: "Zeus"
     major_label: botnet_malware
     minor_labels: ["zeus"]
+  - pattern: "^Analysis$"
+    major_label: other_attack
+    minor_labels: ["analysis_attack"]
+  - pattern: "^Exploits$"
+    major_label: other_attack
+    minor_labels: ["exploit"]
+  - pattern: "^Fuzzers$"
+    major_label: other_attack
+    minor_labels: ["fuzzing"]
+  - pattern: "^Generic$"
+    major_label: other_attack
+    minor_labels: ["generic_attack"]
 
 fallback:
   major_label: other_attack
   minor_labels: ["other_attack"]
-
