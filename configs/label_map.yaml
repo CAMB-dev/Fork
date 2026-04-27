@@ -1,0 +1,131 @@
+major_labels:
+  - benign
+  - dos_ddos
+  - bruteforce
+  - web_attack
+  - botnet_malware
+  - scan
+  - infiltration
+  - heartbleed
+  - other_attack
+
+minor_labels:
+  benign: []
+  dos_ddos:
+    - ddos
+    - dos_hulk
+    - dos_goldeneye
+    - dos_slowloris
+    - dos_slowhttptest
+  bruteforce:
+    - ftp_patator
+    - ssh_patator
+    - brute_force
+  web_attack:
+    - sql_injection
+    - xss
+    - web_bruteforce
+  botnet_malware:
+    - botnet
+    - malware
+    - cridex
+    - geodo
+    - htbot
+    - miuref
+    - neris
+    - nsis
+    - shifu
+    - tinba
+    - virut
+    - zeus
+  scan:
+    - portscan
+    - scan
+  infiltration:
+    - infiltration
+  heartbleed:
+    - heartbleed
+  other_attack:
+    - other_attack
+
+mappings:
+  - pattern: "^BENIGN$|^Normal$|^Background$"
+    major_label: benign
+    minor_labels: []
+  - pattern: "^DDoS$|DDoS"
+    major_label: dos_ddos
+    minor_labels: ["ddos"]
+  - pattern: "DoS Hulk"
+    major_label: dos_ddos
+    minor_labels: ["dos_hulk"]
+  - pattern: "DoS GoldenEye"
+    major_label: dos_ddos
+    minor_labels: ["dos_goldeneye"]
+  - pattern: "DoS slowloris"
+    major_label: dos_ddos
+    minor_labels: ["dos_slowloris"]
+  - pattern: "DoS Slowhttptest|DoS slowhttptest"
+    major_label: dos_ddos
+    minor_labels: ["dos_slowhttptest"]
+  - pattern: "FTP-Patator"
+    major_label: bruteforce
+    minor_labels: ["ftp_patator"]
+  - pattern: "SSH-Patator"
+    major_label: bruteforce
+    minor_labels: ["ssh_patator"]
+  - pattern: "Brute Force|Bruteforce|Web Attack - Brute Force"
+    major_label: bruteforce
+    minor_labels: ["brute_force"]
+  - pattern: "Web Attack - Sql Injection|SQL Injection"
+    major_label: web_attack
+    minor_labels: ["sql_injection"]
+  - pattern: "Web Attack - XSS|XSS"
+    major_label: web_attack
+    minor_labels: ["xss"]
+  - pattern: "Bot|Botnet"
+    major_label: botnet_malware
+    minor_labels: ["botnet"]
+  - pattern: "PortScan|Port Scan"
+    major_label: scan
+    minor_labels: ["portscan"]
+  - pattern: "Infiltration"
+    major_label: infiltration
+    minor_labels: ["infiltration"]
+  - pattern: "Heartbleed"
+    major_label: heartbleed
+    minor_labels: ["heartbleed"]
+  - pattern: "Cridex"
+    major_label: botnet_malware
+    minor_labels: ["cridex"]
+  - pattern: "Geodo"
+    major_label: botnet_malware
+    minor_labels: ["geodo"]
+  - pattern: "Htbot"
+    major_label: botnet_malware
+    minor_labels: ["htbot"]
+  - pattern: "Miuref"
+    major_label: botnet_malware
+    minor_labels: ["miuref"]
+  - pattern: "Neris"
+    major_label: botnet_malware
+    minor_labels: ["neris"]
+  - pattern: "Nsis"
+    major_label: botnet_malware
+    minor_labels: ["nsis"]
+  - pattern: "Shifu"
+    major_label: botnet_malware
+    minor_labels: ["shifu"]
+  - pattern: "Tinba"
+    major_label: botnet_malware
+    minor_labels: ["tinba"]
+  - pattern: "Virut"
+    major_label: botnet_malware
+    minor_labels: ["virut"]
+  - pattern: "Zeus"
+    major_label: botnet_malware
+    minor_labels: ["zeus"]
+
+fallback:
+  major_label: other_attack
+  minor_labels: ["other_attack"]
+

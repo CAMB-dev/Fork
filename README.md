@@ -69,3 +69,20 @@ data/
 5. 实现层级分类模型、训练和评估。
 6. 实现 baseline、消融实验和 CLI 推理。
 
+## 当前已实现命令
+
+```powershell
+uv run traffic-bert version
+uv run traffic-bert vocab write artifacts/vocab.txt
+uv run traffic-bert data build --input-path data/raw/sample.pcap --output-path data/processed/train.parquet --source-dataset custom --label-source filename
+uv run traffic-bert train mlm --train-path data/processed/train.parquet
+uv run traffic-bert train classifier --train-path data/processed/train.parquet --val-path data/processed/val.parquet
+uv run traffic-bert eval classifier --data-path data/processed/test.parquet --checkpoint artifacts/classifier/classifier.pt
+uv run traffic-bert predict hex "474554202f20485454502f312e31" --checkpoint artifacts/classifier/classifier.pt
+```
+
+本仓库固定使用 Python 3.11。若 `uv` 首次运行时没有合适解释器，可以先执行：
+
+```powershell
+uv python install 3.11
+```

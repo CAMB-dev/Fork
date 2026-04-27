@@ -1,0 +1,21 @@
+seed: 42
+device: auto
+
+data:
+  train_path: data/processed/train.parquet
+  val_path: data/processed/val.parquet
+  label_map: configs/label_map.yaml
+  view: masked_header_packet
+  max_length: 512
+  stride: 384
+  max_windows: 8
+
+train:
+  epochs: 3
+  batch_size: 4
+  learning_rate: 0.00003
+  weight_decay: 0.01
+  gradient_clip_norm: 1.0
+  lambda_minor: 1.0
+  output_dir: artifacts/classifier
+

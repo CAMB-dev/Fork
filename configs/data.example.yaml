@@ -1,0 +1,18 @@
+raw_root: data/raw
+processed_root: data/processed
+label_map: configs/label_map.yaml
+
+build:
+  views:
+    - payload_only
+    - full_packet
+    - masked_header_packet
+  split: train
+  label_source: filename
+  keep_empty_payload: true
+  max_packets_per_flow: null
+
+windowing:
+  max_length: 512
+  stride: 384
+
