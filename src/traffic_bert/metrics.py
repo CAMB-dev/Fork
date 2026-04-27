@@ -14,6 +14,7 @@ def major_classification_metrics(
     y_pred: list[int] | np.ndarray,
     labels: list[str],
 ) -> dict[str, Any]:
+    label_ids = list(range(len(labels)))
     return {
         "accuracy": float(accuracy_score(y_true, y_pred)),
         "macro_precision": float(precision_score(y_true, y_pred, average="macro", zero_division=0)),
@@ -23,6 +24,7 @@ def major_classification_metrics(
         "per_class": classification_report(
             y_true,
             y_pred,
+            labels=label_ids,
             target_names=labels,
             output_dict=True,
             zero_division=0,
@@ -40,4 +42,3 @@ def multilabel_f1(
         "micro_f1": float(f1_score(y_true, y_pred, average="micro", zero_division=0)),
         "macro_f1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
     }
-

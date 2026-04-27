@@ -78,7 +78,10 @@ uv run traffic-bert data build --input-path data/raw/sample.pcap --output-path d
 uv run traffic-bert train mlm --train-path data/processed/train.parquet
 uv run traffic-bert train classifier --train-path data/processed/train.parquet --val-path data/processed/val.parquet
 uv run traffic-bert eval classifier --data-path data/processed/test.parquet --checkpoint artifacts/classifier/classifier.pt
+uv run traffic-bert eval calibrate-thresholds --data-path data/processed/val.parquet --checkpoint artifacts/classifier/classifier.pt
+uv run traffic-bert baseline train --train-path data/processed/train.parquet --val-path data/processed/val.parquet
 uv run traffic-bert predict hex "474554202f20485454502f312e31" --checkpoint artifacts/classifier/classifier.pt
+uv run traffic-bert predict pcap data/raw/sample.pcap --checkpoint artifacts/classifier/classifier.pt
 ```
 
 本仓库固定使用 Python 3.11。若 `uv` 首次运行时没有合适解释器，可以先执行：
