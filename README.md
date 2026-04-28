@@ -27,7 +27,7 @@
 ## 已确定技术路线
 
 - 项目管理：`uv` + Python 3.10。
-- 深度学习框架：PyTorch + CUDA。
+- 深度学习框架：PyTorch + CUDA，默认训练/评估设备为 `cuda`。
 - 模型主线：Byte-BERT，小型 BERT 配置优先适配 4GB 显存。
 - 输入粒度：flow 级样本，不采用单包样本作为主实验。
 - 字节映射：`b_00` 到 `b_ff` 的固定字节词表，加 BERT special tokens。

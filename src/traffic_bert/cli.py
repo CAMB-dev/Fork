@@ -473,7 +473,7 @@ def train_classifier(
     max_length: int = typer.Option(512, help="BERT max sequence length."),
     stride: int = typer.Option(384, help="Sliding window stride."),
     max_windows: Optional[int] = typer.Option(8, help="Max windows per flow."),
-    device: str = typer.Option("auto", help="auto, cpu, or cuda."),
+    device: str = typer.Option("cuda", help="cuda, cpu, or auto."),
     seed: int = typer.Option(42, help="Random seed."),
     log_path: Optional[Path] = typer.Option(None, help="Optional JSONL training log."),
     resume_checkpoint: Optional[Path] = typer.Option(None, help="Resume model weights."),
@@ -618,7 +618,7 @@ def train_mlm(
     max_length: int = typer.Option(512, help="BERT max sequence length."),
     stride: int = typer.Option(384, help="Sliding window stride."),
     max_windows: Optional[int] = typer.Option(8, help="Max windows per flow."),
-    device: str = typer.Option("auto", help="auto, cpu, or cuda."),
+    device: str = typer.Option("cuda", help="cuda, cpu, or auto."),
     seed: int = typer.Option(42, help="Random seed."),
     log_path: Optional[Path] = typer.Option(None, help="Optional JSONL training log."),
     resume_checkpoint: Optional[Path] = typer.Option(None, help="Resume MLM checkpoint."),
@@ -742,7 +742,7 @@ def train_neural_baseline(
     max_length: int = typer.Option(512, help="BERT-style max sequence length."),
     stride: int = typer.Option(384, help="Sliding window stride."),
     max_windows: Optional[int] = typer.Option(4, help="Max windows per flow."),
-    device: str = typer.Option("auto", help="auto, cpu, or cuda."),
+    device: str = typer.Option("cuda", help="cuda, cpu, or auto."),
     seed: int = typer.Option(42, help="Random seed."),
     log_path: Optional[Path] = typer.Option(None, help="Optional JSONL training log."),
 ) -> None:
@@ -832,7 +832,7 @@ def eval_classifier(
     max_length: int = typer.Option(512, help="BERT max sequence length."),
     stride: int = typer.Option(384, help="Sliding window stride."),
     max_windows: Optional[int] = typer.Option(8, help="Max windows per flow."),
-    device: str = typer.Option("auto", help="auto, cpu, or cuda."),
+    device: str = typer.Option("cuda", help="cuda, cpu, or auto."),
     output_dir: Optional[Path] = typer.Option(None, help="Optional metrics output directory."),
 ) -> None:
     """Evaluate a classifier checkpoint."""
@@ -865,7 +865,7 @@ def eval_neural_baseline(
     batch_size: int = typer.Option(8, help="Batch size."),
     stride: int = typer.Option(384, help="Sliding window stride."),
     max_windows: Optional[int] = typer.Option(4, help="Max windows per flow."),
-    device: str = typer.Option("auto", help="auto, cpu, or cuda."),
+    device: str = typer.Option("cuda", help="cuda, cpu, or auto."),
     output_dir: Optional[Path] = typer.Option(None, help="Optional metrics output directory."),
 ) -> None:
     """Evaluate a neural baseline checkpoint."""
@@ -911,7 +911,7 @@ def calibrate_classifier_thresholds(
     max_length: int = typer.Option(512, help="BERT max sequence length."),
     stride: int = typer.Option(384, help="Sliding window stride."),
     max_windows: Optional[int] = typer.Option(8, help="Max windows per flow."),
-    device: str = typer.Option("auto", help="auto, cpu, or cuda."),
+    device: str = typer.Option("cuda", help="cuda, cpu, or auto."),
 ) -> None:
     """Calibrate per-minor-label thresholds on validation data."""
 
@@ -950,7 +950,7 @@ def predict_hex(
     label_map_path: Path = typer.Option(Path("configs/label_map.yaml"), help="Label map YAML."),
     max_length: int = typer.Option(512, help="BERT max sequence length."),
     stride: int = typer.Option(384, help="Sliding window stride."),
-    device: str = typer.Option("auto", help="auto, cpu, or cuda."),
+    device: str = typer.Option("cuda", help="cuda, cpu, or auto."),
     thresholds: Optional[Path] = typer.Option(None, help="Minor threshold JSON file."),
     output: Optional[Path] = typer.Option(None, help="Optional prediction JSON path."),
 ) -> None:
@@ -1000,7 +1000,7 @@ def predict_pcap(
     max_length: int = typer.Option(512, help="BERT max sequence length."),
     stride: int = typer.Option(384, help="Sliding window stride."),
     max_packets_per_flow: Optional[int] = typer.Option(None, help="Optional packet cap per flow."),
-    device: str = typer.Option("auto", help="auto, cpu, or cuda."),
+    device: str = typer.Option("cuda", help="cuda, cpu, or auto."),
     thresholds: Optional[Path] = typer.Option(None, help="Minor threshold JSON file."),
     output: Optional[Path] = typer.Option(None, help="Optional JSONL output path."),
 ) -> None:

@@ -1,5 +1,5 @@
 seed: 42
-device: auto
+device: cuda
 
 data:
   train_path: data/processed/train.parquet

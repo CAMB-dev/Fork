@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 
-def resolve_device(device: str = "auto") -> torch.device:
+def resolve_device(device: str = "cuda") -> torch.device:
     if device == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device)
