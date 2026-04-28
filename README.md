@@ -75,6 +75,7 @@ data/
 uv run traffic-bert version
 uv run traffic-bert vocab write artifacts/vocab.txt
 uv run traffic-bert data build --input-path data/raw/sample.pcap --output-path data/processed/train.parquet --source-dataset custom --label-source filename
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/preprocess_ustc_tfc2016.ps1 -Workspace .
 uv run traffic-bert data build-payload-csv --input-path data/raw/Payload-Byte/Payload_data_CICIDS2017.csv --output-path data/processed/payload_byte/cicids2017.parquet --source-dataset payload-byte-cicids2017
 uv run traffic-bert data build-config --config configs/data.example.yaml
 uv run traffic-bert data split --input-path data/processed/all.parquet --output-dir data/processed/split

@@ -155,6 +155,18 @@ Malware/<family>.pcap
 - benign app -> `major_label=benign`
 - malware family -> `major_label=botnet_malware`，`minor_labels=[family]`
 
+本地完整批处理使用仓库脚本顺序解析每个 PCAP，默认只生成 `payload_only` 视图，并限制常见数值库线程数和进程 CPU 亲和性，避免预处理时占满 CPU：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/preprocess_ustc_tfc2016.ps1 -Workspace .
+```
+
+输出约定：
+
+- 单文件 parquet：`data/processed/ustc_tfc2016/files/*.parquet`
+- 单文件 stdout/stderr：`data/processed/ustc_tfc2016/logs/*.log`
+- 批处理进度：`data/processed/ustc_tfc2016/preprocess_progress.jsonl`
+
 ### Payload-Byte CSV
 
 Payload-Byte 文件已经把每条样本整理成固定长度的 packet payload byte 列：
