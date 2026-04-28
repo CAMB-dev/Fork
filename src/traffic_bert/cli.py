@@ -27,7 +27,11 @@ from traffic_bert.data.dataset import FlowWindowDataset, flow_collate
 from traffic_bert.data.pcap import PcapFlowExtractor
 from traffic_bert.data.payload_csv import PayloadCsvBuildConfig, build_payload_csv_dataset
 from traffic_bert.data.schema import InputView
-from traffic_bert.data.split import assign_file_time_split, processed_stats
+from traffic_bert.data.split import (
+    assign_file_time_split,
+    assign_stratified_hash_split,
+    processed_stats,
+)
 from traffic_bert.data.validate import validation_summary
 from traffic_bert.inference import decode_hierarchical_prediction
 from traffic_bert.labels import LabelMap
@@ -185,18 +189,31 @@ def split_data(
     input_path: Path = typer.Option(..., help="Input processed Parquet."),
     output_dir: Path = typer.Option(..., help="Directory for train/val/test Parquet files."),
     group_column: str = typer.Option("source_file", help="Column kept within one split."),
+    stratify_column: Optional[str] = typer.Option(
+        None,
+        help="Optional label column for stable stratified group splitting.",
+    ),
     train_ratio: float = typer.Option(0.7, help="Training split ratio."),
     val_ratio: float = typer.Option(0.15, help="Validation split ratio."),
 ) -> None:
     """Assign stable group-wise train/val/test splits and write split Parquet files."""
 
     frame = pd.read_parquet(input_path)
-    frame = assign_file_time_split(
-        frame,
-        train_ratio=train_ratio,
-        val_ratio=val_ratio,
-        group_column=group_column,
-    )
+    if stratify_column is None:
+        frame = assign_file_time_split(
+            frame,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            group_column=group_column,
+        )
+    else:
+        frame = assign_stratified_hash_split(
+            frame,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            group_column=group_column,
+            stratify_column=stratify_column,
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     for split_name in ["train", "val", "test"]:
         frame[frame["split"] == split_name].to_parquet(output_dir / f"{split_name}.parquet", index=False)
@@ -227,6 +244,8 @@ def merge_data(
             "split",
             "view",
             "major_label",
+            "minor_labels",
+            "source_label",
             "source_dataset",
             "packet_count",
             "payload_byte_length",

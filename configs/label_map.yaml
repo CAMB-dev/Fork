@@ -97,7 +97,7 @@ mappings:
   - pattern: "Web Attack - XSS|XSS"
     major_label: web_attack
     minor_labels: ["xss"]
-  - pattern: "Bot|Botnet"
+  - pattern: '\bBot(?:net)?\b'
     major_label: botnet_malware
     minor_labels: ["botnet"]
   - pattern: "PortScan|Port Scan"
