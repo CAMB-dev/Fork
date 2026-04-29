@@ -16,13 +16,15 @@
 
 第一阶段：
 
-- USTC-TFC2016。
-- CICIDS2017。
+- USTC-TFC2016：当前主监督训练集，已完成 flow 级 `payload_only` 预处理、重标、合并和划分。
+- Payload-Byte：当前作为 MLM post-train 候选数据，包含 Payload-Byte 版 CICIDS2017 和 UNSW，不直接混入第一阶段监督训练。
+- CICIDS2017 原始 PCAP + CSV：下一批优先处理，用于补齐更多攻击大类。
 
 后续扩展：
 
-- CSE-CIC-IDS2018。
 - CIC-DDoS2019。
+- CSE-CIC-IDS2018。
+- CTU-13。
 
 每个数据集需要记录：
 
@@ -32,6 +34,21 @@
 - 无标签 flow 数量。
 - 各大类/细类数量。
 - train/val/test 划分比例。
+
+当前训练路线：
+
+```text
+MLM post-train:
+  USTC + Payload-Byte 的 payload_only 字节序列
+
+监督 fine-tune:
+  USTC split_label_stratified
+
+泛化对照:
+  USTC split_source_file
+```
+
+不直接综合 USTC 和 Payload-Byte 做第一阶段监督训练，原因是 USTC 是 flow 级样本，而 Payload-Byte 是单包行级样本，直接混合容易引入数据集来源偏差。
 
 ## 3. 主实验
 
@@ -181,4 +198,3 @@ max pooling
 - 模型设计和题目要求一致。
 - 实验对比和消融足够支撑结论。
 - 指标不只依赖 accuracy，能体现类别不均衡下的真实性能。
-

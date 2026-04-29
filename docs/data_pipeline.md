@@ -245,7 +245,7 @@ flow_001/window_002
 
 ## 10. 数据划分
 
-主实验采用文件或时间划分：
+主实验原则上采用文件或时间划分：
 
 ```text
 train: 若干 PCAP 文件或时间段
@@ -254,6 +254,13 @@ test:  独立 PCAP 文件或时间段
 ```
 
 不将同一 PCAP 或同一时间段中的相邻 flow 随机打散到不同集合。
+
+当前 USTC-TFC2016 有一个特殊情况：每个恶意家族基本只对应一个 PCAP 文件。若严格按 `source_file` 划分，很多恶意细类不会同时出现在 train/val/test，导致细分类无法正常训练和评估。因此当前保留两套划分：
+
+- 主训练划分：`source_label` 分层 + `flow_id` 稳定划分，路径为 `data/processed/ustc_tfc2016/split_label_stratified/`。
+- 泛化对照划分：严格 `source_file` 划分，路径为 `data/processed/ustc_tfc2016/split_source_file/`。
+
+主实验训练优先使用 `split_label_stratified`，论文中需要说明这是为了保证细分类标签覆盖；`split_source_file` 用于额外评估未见 PCAP 文件的泛化能力。
 
 ## 11. 类别均衡
 

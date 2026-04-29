@@ -35,7 +35,7 @@
 - 分类策略：大类 softmax 单选，子类 sigmoid 多标签阈值激活。
 - 数据划分：按文件或时间划分，避免随机 flow 划分造成数据泄漏。
 
-详细决策见 [docs/project_decisions.md](docs/project_decisions.md)。
+详细决策见 [docs/project_decisions.md](docs/project_decisions.md)。当前数据处理状态见 [docs/current_data_status.md](docs/current_data_status.md)。
 
 ## 目录结构
 
