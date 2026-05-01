@@ -31,6 +31,7 @@ from traffic_bert.data.split import (
     assign_file_time_split,
     assign_stratified_hash_split,
     processed_stats,
+    stratified_sample,
 )
 from traffic_bert.data.validate import validation_summary
 from traffic_bert.inference import decode_hierarchical_prediction
@@ -105,7 +106,7 @@ def build_data(
     split: str = typer.Option("train", help="Split name stored in rows."),
     label_source: str = typer.Option(
         "filename",
-        help="filename, parent, parent_filename, or static.",
+        help="filename, parent, parent_filename, static, or cic_csv.",
     ),
     static_label: Optional[str] = typer.Option(None, help="Label used with label_source=static."),
     views: str = typer.Option(
@@ -114,6 +115,19 @@ def build_data(
     ),
     keep_empty_payload: bool = typer.Option(True, help="Keep flows without L4 payload."),
     max_packets_per_flow: Optional[int] = typer.Option(None, help="Optional packet cap per flow."),
+    max_packets_to_read: Optional[int] = typer.Option(
+        None,
+        help="Optional packet read cap for smoke builds.",
+    ),
+    max_packets_to_skip: int = typer.Option(0, help="Optional packet skip count for smoke builds."),
+    min_packet_time: Optional[float] = typer.Option(
+        None,
+        help="Optional minimum packet Unix timestamp for smoke builds.",
+    ),
+    max_packet_time: Optional[float] = typer.Option(
+        None,
+        help="Optional maximum packet Unix timestamp for smoke builds.",
+    ),
     label_csv: Optional[Path] = typer.Option(None, help="CIC-style flow label CSV."),
     drop_unmatched_labels: bool = typer.Option(True, help="Drop flows without matched labels."),
 ) -> None:
@@ -134,8 +148,55 @@ def build_data(
             views=selected_views,
             keep_empty_payload=keep_empty_payload,
             max_packets_per_flow=max_packets_per_flow,
+            max_packets_to_read=max_packets_to_read,
+            max_packets_to_skip=max_packets_to_skip,
+            min_packet_time=min_packet_time,
+            max_packet_time=max_packet_time,
         )
     )
+    typer.echo(json.dumps(stats, ensure_ascii=False, indent=2))
+
+
+@data_app.command("sample-stratified")
+def sample_stratified_data(
+    input_path: Path = typer.Option(..., help="Input processed Parquet."),
+    output_dir: Path = typer.Option(..., help="Directory for sampled split files."),
+    stratify_column: str = typer.Option("major_label", help="Column capped per class."),
+    split_stratify_column: str = typer.Option(
+        "source_label",
+        help="Column used to preserve labels across train/val/test.",
+    ),
+    group_column: str = typer.Option("flow_id", help="Column kept within one split."),
+    max_per_class: int = typer.Option(2_000, help="Maximum rows per class before splitting."),
+    train_ratio: float = typer.Option(0.7, help="Training split ratio."),
+    val_ratio: float = typer.Option(0.15, help="Validation split ratio."),
+    seed: int = typer.Option(42, help="Deterministic sampling seed."),
+) -> None:
+    """Create a small stratified train/val/test subset from processed data."""
+
+    frame = pd.read_parquet(input_path)
+    sampled = stratified_sample(
+        frame,
+        stratify_column=stratify_column,
+        max_per_class=max_per_class,
+        seed=seed,
+    )
+    sampled = assign_stratified_hash_split(
+        sampled,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        group_column=group_column,
+        stratify_column=split_stratify_column,
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for split_name in ["train", "val", "test"]:
+        split_frame = sampled[sampled["split"] == split_name]
+        split_frame.to_parquet(output_dir / f"{split_name}.parquet", index=False)
+        split_frame["major_label"].value_counts().rename_axis("major_label").reset_index(
+            name="rows"
+        ).to_csv(output_dir / f"{split_name}.class_distribution.csv", index=False)
+    stats = processed_stats(sampled)
+    write_json(output_dir / "split.stats.json", stats)
     typer.echo(json.dumps(stats, ensure_ascii=False, indent=2))
 
 

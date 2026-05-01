@@ -74,23 +74,56 @@ class CicFlowLabelIndex:
     @classmethod
     def from_frame(cls, frame: pd.DataFrame) -> "CicFlowLabelIndex":
         frame = normalize_cic_columns(frame)
+        source_ip_column = "source_ip" if "source_ip" in frame else "src_ip"
+        destination_ip_column = (
+            "destination_ip" if "destination_ip" in frame else "dst_ip"
+        )
+        source_port_column = "source_port" if "source_port" in frame else "src_port"
+        destination_port_column = (
+            "destination_port" if "destination_port" in frame else "dst_port"
+        )
+        required_columns = [
+            source_ip_column,
+            destination_ip_column,
+            source_port_column,
+            destination_port_column,
+            "label",
+        ]
+        missing = [column for column in required_columns if column not in frame]
+        if missing:
+            raise ValueError(f"missing CIC label columns: {', '.join(missing)}")
+
+        selected_columns = required_columns + [
+            "protocol" if "protocol" in frame else None,
+            "timestamp" if "timestamp" in frame else None,
+        ]
+        selected_columns = [column for column in selected_columns if column is not None]
+        work = frame[selected_columns].dropna(subset=required_columns).copy()
+        if "protocol" not in work:
+            work["protocol"] = ""
+        if "timestamp" in work:
+            timestamps = pd.to_datetime(work["timestamp"], errors="coerce")
+        else:
+            timestamps = pd.Series([pd.NaT] * len(work), index=work.index)
+
         records: list[CicLabelRecord] = []
-        for _, row in frame.iterrows():
-            src_ip = row.get("source_ip") or row.get("src_ip")
-            dst_ip = row.get("destination_ip") or row.get("dst_ip")
-            src_port = row.get("source_port") or row.get("src_port")
-            dst_port = row.get("destination_port") or row.get("dst_port")
-            protocol = row.get("protocol", "")
-            label = row.get("label")
-            if pd.isna(src_ip) or pd.isna(dst_ip) or pd.isna(src_port) or pd.isna(dst_port):
-                continue
-            if label is None or pd.isna(label):
-                continue
-            timestamp = parse_cic_timestamp(row.get("timestamp"))
+        for row, timestamp_value in zip(
+            work.itertuples(index=False),
+            timestamps,
+            strict=True,
+        ):
+            data = row._asdict()
+            timestamp = None if pd.isna(timestamp_value) else pd.Timestamp(timestamp_value)
             records.append(
                 CicLabelRecord(
-                    key=canonical_flow_key(src_ip, dst_ip, int(src_port), int(dst_port), protocol),
-                    label=str(label),
+                    key=canonical_flow_key(
+                        data[source_ip_column],
+                        data[destination_ip_column],
+                        int(data[source_port_column]),
+                        int(data[destination_port_column]),
+                        data["protocol"],
+                    ),
+                    label=str(data["label"]),
                     timestamp=timestamp,
                 )
             )
@@ -116,4 +149,3 @@ class CicFlowLabelIndex:
             return candidates[0].label
         best = min(candidates_with_time, key=lambda item: abs(item.timestamp - timestamp))
         return best.label
-

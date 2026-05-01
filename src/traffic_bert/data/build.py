@@ -34,6 +34,10 @@ class BuildConfig:
     )
     keep_empty_payload: bool = True
     max_packets_per_flow: int | None = None
+    max_packets_to_read: int | None = None
+    max_packets_to_skip: int = 0
+    min_packet_time: float | None = None
+    max_packet_time: float | None = None
 
 
 def infer_source_label(path: Path, label_source: str, static_label: str | None = None) -> str:
@@ -109,6 +113,10 @@ def build_config_from_dict(raw: dict) -> list[BuildConfig]:
                 views=views,
                 keep_empty_payload=bool(merged.get("keep_empty_payload", True)),
                 max_packets_per_flow=merged.get("max_packets_per_flow"),
+                max_packets_to_read=merged.get("max_packets_to_read"),
+                max_packets_to_skip=int(merged.get("max_packets_to_skip", 0)),
+                min_packet_time=merged.get("min_packet_time"),
+                max_packet_time=merged.get("max_packet_time"),
             )
         )
     return configs
@@ -120,7 +128,13 @@ def build_config_from_yaml(path: str | Path) -> list[BuildConfig]:
 
 def build_processed_dataset(config: BuildConfig) -> dict:
     label_map = LabelMap.from_yaml(config.label_map_path)
-    extractor = PcapFlowExtractor(max_packets_per_flow=config.max_packets_per_flow)
+    extractor = PcapFlowExtractor(
+        max_packets_per_flow=config.max_packets_per_flow,
+        max_packets_to_read=config.max_packets_to_read,
+        max_packets_to_skip=config.max_packets_to_skip,
+        min_packet_time=config.min_packet_time,
+        max_packet_time=config.max_packet_time,
+    )
     cic_index = None
     if config.label_source == "cic_csv":
         if config.label_csv_path is None:

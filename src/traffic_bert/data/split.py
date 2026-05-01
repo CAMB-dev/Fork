@@ -111,6 +111,32 @@ def assign_stratified_hash_split(
     return output
 
 
+def stratified_sample(
+    frame: pd.DataFrame,
+    stratify_column: str = "major_label",
+    max_per_class: int = 2_000,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """Return a deterministic per-class capped sample."""
+
+    if max_per_class <= 0:
+        raise ValueError("max_per_class must be positive")
+    if stratify_column not in frame.columns:
+        raise KeyError(f"missing stratify_column: {stratify_column}")
+
+    parts = []
+    for _, group in frame.groupby(stratify_column, sort=True):
+        if len(group) > max_per_class:
+            group = group.sample(n=max_per_class, random_state=seed)
+        parts.append(group)
+    if not parts:
+        return frame.copy()
+    output = pd.concat(parts, ignore_index=True)
+    if {"start_time", "flow_id"} <= set(frame.columns):
+        output = output.sort_values(["start_time", "flow_id"], kind="mergesort")
+    return output
+
+
 def _flatten_minor_labels(values: pd.Series) -> list[str]:
     labels: list[str] = []
     for value in values:

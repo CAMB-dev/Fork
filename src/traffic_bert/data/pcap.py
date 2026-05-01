@@ -63,71 +63,129 @@ def _mask_packet(packet: Any) -> bytes:
 class PcapFlowExtractor:
     """Extract bidirectional TCP/UDP flows from PCAP files."""
 
-    def __init__(self, max_packets_per_flow: int | None = None) -> None:
+    def __init__(
+        self,
+        max_packets_per_flow: int | None = None,
+        max_packets_to_read: int | None = None,
+        max_packets_to_skip: int = 0,
+        min_packet_time: float | None = None,
+        max_packet_time: float | None = None,
+    ) -> None:
         self.max_packets_per_flow = max_packets_per_flow
+        self.max_packets_to_read = max_packets_to_read
+        self.max_packets_to_skip = max_packets_to_skip
+        self.min_packet_time = min_packet_time
+        self.max_packet_time = max_packet_time
 
     def extract(self, pcap_path: str | Path) -> list[FlowRecord]:
         from scapy.all import PcapReader
-        from scapy.layers.inet import IP
 
         pcap_path = Path(pcap_path)
         flows: dict[tuple, FlowRecord] = {}
         forward_endpoint: dict[tuple, tuple[str, int, str, int]] = {}
 
+        if self.min_packet_time is not None or self.max_packet_time is not None:
+            return self._extract_time_window(pcap_path, flows, forward_endpoint)
+
         with PcapReader(str(pcap_path)) as reader:
-            for packet in reader:
-                if IP not in packet:
+            for packet_index, packet in enumerate(reader):
+                if packet_index < self.max_packets_to_skip:
                     continue
-
-                transport = _payload_and_proto(packet)
-                if transport is None:
-                    continue
-                proto, src_port, dst_port, payload = transport
-                src_ip = str(packet[IP].src)
-                dst_ip = str(packet[IP].dst)
-                lookup_key = _flow_lookup_key(src_ip, dst_ip, src_port, dst_port, proto)
-
-                if lookup_key not in forward_endpoint:
-                    forward_endpoint[lookup_key] = (src_ip, src_port, dst_ip, dst_port)
-
-                fwd = forward_endpoint[lookup_key]
-                direction = (
-                    "fwd"
-                    if (src_ip, src_port, dst_ip, dst_port) == fwd
-                    else "bwd"
-                )
-
-                timestamp = float(packet.time)
-                if lookup_key not in flows:
-                    _, endpoint_a, endpoint_b = lookup_key
-                    flows[lookup_key] = FlowRecord(
-                        flow_id=_flow_id(str(pcap_path), lookup_key),
-                        source_file=str(pcap_path),
-                        protocol=proto,
-                        endpoint_a=endpoint_a,
-                        endpoint_b=endpoint_b,
-                        start_time=timestamp,
-                        end_time=timestamp,
-                        packets=[],
-                    )
-
-                flow = flows[lookup_key]
                 if (
-                    self.max_packets_per_flow is not None
-                    and len(flow.packets) >= self.max_packets_per_flow
+                    self.max_packets_to_read is not None
+                    and packet_index >= self.max_packets_to_skip + self.max_packets_to_read
                 ):
-                    continue
-
-                flow.packets.append(
-                    PacketViews(
-                        timestamp=timestamp,
-                        direction=direction,
-                        payload_only=payload,
-                        full_packet=bytes(packet),
-                        masked_header_packet=_mask_packet(packet),
-                    )
-                )
-                flow.end_time = timestamp
+                    break
+                self._add_packet(packet, pcap_path, flows, forward_endpoint)
 
         return sorted(flows.values(), key=lambda item: (item.start_time, item.flow_id))
 
+    def _extract_time_window(
+        self,
+        pcap_path: Path,
+        flows: dict[tuple, FlowRecord],
+        forward_endpoint: dict[tuple, tuple[str, int, str, int]],
+    ) -> list[FlowRecord]:
+        from scapy.all import RawPcapReader
+        from scapy.layers.l2 import Ether
+
+        decoded_packets = 0
+        with RawPcapReader(str(pcap_path)) as reader:
+            for _, (raw_packet, metadata) in enumerate(reader):
+                timestamp = _raw_metadata_timestamp(metadata)
+                if self.min_packet_time is not None and timestamp < self.min_packet_time:
+                    continue
+                if self.max_packet_time is not None and timestamp > self.max_packet_time:
+                    break
+                if (
+                    self.max_packets_to_read is not None
+                    and decoded_packets >= self.max_packets_to_read
+                ):
+                    break
+                packet = Ether(raw_packet)
+                packet.time = timestamp
+                decoded_packets += 1
+                self._add_packet(packet, pcap_path, flows, forward_endpoint)
+
+        return sorted(flows.values(), key=lambda item: (item.start_time, item.flow_id))
+
+    def _add_packet(
+        self,
+        packet: Any,
+        pcap_path: Path,
+        flows: dict[tuple, FlowRecord],
+        forward_endpoint: dict[tuple, tuple[str, int, str, int]],
+    ) -> None:
+        from scapy.layers.inet import IP
+
+        if IP not in packet:
+            return
+
+        transport = _payload_and_proto(packet)
+        if transport is None:
+            return
+        proto, src_port, dst_port, payload = transport
+        src_ip = str(packet[IP].src)
+        dst_ip = str(packet[IP].dst)
+        lookup_key = _flow_lookup_key(src_ip, dst_ip, src_port, dst_port, proto)
+
+        if lookup_key not in forward_endpoint:
+            forward_endpoint[lookup_key] = (src_ip, src_port, dst_ip, dst_port)
+
+        fwd = forward_endpoint[lookup_key]
+        direction = "fwd" if (src_ip, src_port, dst_ip, dst_port) == fwd else "bwd"
+
+        timestamp = float(packet.time)
+        if lookup_key not in flows:
+            _, endpoint_a, endpoint_b = lookup_key
+            flows[lookup_key] = FlowRecord(
+                flow_id=_flow_id(str(pcap_path), lookup_key),
+                source_file=str(pcap_path),
+                protocol=proto,
+                endpoint_a=endpoint_a,
+                endpoint_b=endpoint_b,
+                start_time=timestamp,
+                end_time=timestamp,
+                packets=[],
+            )
+
+        flow = flows[lookup_key]
+        if self.max_packets_per_flow is not None and len(flow.packets) >= self.max_packets_per_flow:
+            return
+
+        flow.packets.append(
+            PacketViews(
+                timestamp=timestamp,
+                direction=direction,
+                payload_only=payload,
+                full_packet=bytes(packet),
+                masked_header_packet=_mask_packet(packet),
+            )
+        )
+        flow.end_time = timestamp
+
+
+def _raw_metadata_timestamp(metadata: Any) -> float:
+    if hasattr(metadata, "sec"):
+        return float(metadata.sec) + float(metadata.usec) / 1_000_000
+    return float(((metadata.tshigh << 32) + metadata.tslow) / metadata.tsresol)

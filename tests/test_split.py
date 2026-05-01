@@ -4,6 +4,7 @@ from traffic_bert.data.split import (
     assign_file_time_split,
     assign_stratified_hash_split,
     processed_stats,
+    stratified_sample,
 )
 
 
@@ -64,3 +65,20 @@ def test_assign_stratified_hash_split_keeps_groups_and_labels_present() -> None:
     counts = result.groupby(["source_label", "split"]).size().unstack(fill_value=0)
     assert set(counts.columns) == {"train", "val", "test"}
     assert (counts > 0).all().all()
+
+
+def test_stratified_sample_caps_each_class() -> None:
+    frame = pd.DataFrame(
+        {
+            "flow_id": [f"f{i}" for i in range(8)],
+            "major_label": ["benign"] * 5 + ["dos_ddos"] * 3,
+            "start_time": list(range(8)),
+        }
+    )
+
+    sampled = stratified_sample(frame, max_per_class=2, seed=1)
+
+    assert sampled["major_label"].value_counts().to_dict() == {
+        "benign": 2,
+        "dos_ddos": 2,
+    }

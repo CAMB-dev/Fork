@@ -141,6 +141,23 @@ CIC 系列通常提供 PCAP 和 flow/CSV 标签。对齐时使用：
 - 不进入监督分类数据。
 - 可以保留到无标签 MLM 预训练数据。
 
+当前 CICIDS2017 原始 PCAP 的第一轮 smoke 处理只使用 Friday 数据，先验证 PCAP flow 重组和官方 labelled flow CSV 对齐：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/preprocess_cicids2017_friday_smoke.ps1 -Workspace . -MaxPacketsToRead 250000 -StartTime "2017-07-07T12:34:00Z" -EndTime "2017-07-07T12:45:00Z" -MaxPerMajor 2000
+```
+
+输出约定：
+
+- 原始文件：`data/raw/CICIDS2017/pcaps/Friday-WorkingHours.pcap`
+- 合并标签：`data/raw/CICIDS2017/labels/friday_labelled_flows_<filter>.csv`
+- 初始 processed：`data/processed/cicids2017/friday_payload_only/flows.parquet`
+- smoke split：`data/processed/cicids2017/smoke/{train,val,test}.parquet`
+- smoke 产物：`artifacts/cicids2017_smoke/`
+
+该 smoke 默认只构建 `payload_only` 视图，`keep_empty_payload=false`，每个 flow 最多保留 16 个 packet，并通过 `MaxPacketsToRead`、`MaxPacketsToSkip` 或 `StartTime`/`EndTime` 控制 PCAP 切片。小样本可用于链路验证，不作为正式论文指标。
+PowerShell 封装默认使用 `http://127.0.0.1:7890` 作为下载代理，可通过 `-Proxy ""` 关闭。
+
 ### USTC-TFC2016
 
 USTC 数据可从目录名或文件名获得原始类别：
