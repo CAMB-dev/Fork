@@ -37,7 +37,9 @@ from traffic_bert.data.validate import validation_summary
 from traffic_bert.inference import decode_hierarchical_prediction
 from traffic_bert.labels import LabelMap
 from traffic_bert.metrics import major_classification_metrics, multilabel_f1
-from traffic_bert.metrics_io import export_major_metrics
+from traffic_bert.metrics import attack_detection_metrics
+from traffic_bert.metrics import multilabel_classification_report
+from traffic_bert.metrics_io import export_major_metrics, export_minor_metrics
 from traffic_bert.models import (
     ByteCnnClassifier,
     ByteGruClassifier,
@@ -60,9 +62,11 @@ from traffic_bert.tokenizer import (
 from traffic_bert.training import (
     collect_classifier_outputs,
     resolve_device,
+    save_epoch_checkpoint,
     save_checkpoint,
     train_classifier_epoch,
     train_mlm_epoch,
+    write_history_files,
 )
 
 app = typer.Typer(help="Traffic Byte-BERT experiment toolkit.")
@@ -404,7 +408,9 @@ def _train_neural_baseline_epoch(
     model.train()
     total_loss = 0.0
     steps = 0
-    for batch in dataloader:
+    from traffic_bert.training import rich_train_batches
+
+    for batch, progress, task in rich_train_batches(dataloader, "neural-train"):
         optimizer.zero_grad(set_to_none=True)
         logits = model(
             batch["input_ids"].to(device),
@@ -413,8 +419,15 @@ def _train_neural_baseline_epoch(
         loss = torch.nn.functional.cross_entropy(logits, batch["major_labels"].to(device))
         loss.backward()
         optimizer.step()
-        total_loss += float(loss.detach().cpu())
+        current_loss = float(loss.detach().cpu())
+        total_loss += current_loss
         steps += 1
+        progress.update(
+            task,
+            advance=1,
+            current_loss=f"{current_loss:.4f}",
+            avg_loss=f"{total_loss / max(steps, 1):.4f}",
+        )
     return {"loss": total_loss / max(steps, 1)}
 
 
@@ -443,16 +456,22 @@ def _eval_neural_baseline(
     model.eval()
     y_true = []
     y_pred = []
-    for batch in loader:
+    from traffic_bert.training import rich_train_batches
+
+    for batch, progress, task in rich_train_batches(loader, "neural-eval"):
         logits = model(
             batch["input_ids"].to(device),
             batch["attention_mask"].to(device),
         )
         y_true.extend(batch["major_labels"].tolist())
         y_pred.extend(logits.argmax(dim=-1).cpu().tolist())
+        progress.update(task, advance=1)
     metrics = major_classification_metrics(y_true, y_pred, label_map.major_labels)
     if output_dir is not None:
         export_major_metrics(output_dir, metrics, y_true, y_pred, label_map.major_labels)
+        from traffic_bert.metrics import attack_detection_metrics
+
+        metrics["detection"] = attack_detection_metrics(y_true, y_pred, label_map.major_labels)
         write_json(output_dir / "metrics.json", metrics)
     return metrics
 
@@ -530,12 +549,20 @@ def _evaluate_classifier_model(
     y_true = outputs["major_labels"].numpy()
     y_pred = outputs["major_logits"].argmax(dim=-1).numpy()
     metrics = major_classification_metrics(y_true, y_pred, label_map.major_labels)
+    metrics["detection"] = attack_detection_metrics(y_true, y_pred, label_map.major_labels)
     metrics["minor"] = multilabel_f1(
         outputs["minor_labels"].numpy(),
         torch.sigmoid(outputs["minor_logits"]).numpy(),
     )
+    minor_report = multilabel_classification_report(
+        outputs["minor_labels"].numpy(),
+        torch.sigmoid(outputs["minor_logits"]).numpy(),
+        label_map.minor_labels,
+    )
+    metrics["minor_report"] = minor_report
     if output_dir is not None:
         export_major_metrics(output_dir, metrics, y_true.tolist(), y_pred.tolist(), label_map.major_labels)
+        export_minor_metrics(output_dir, minor_report, label_map.minor_labels)
         write_json(output_dir / "metrics.json", metrics)
     return metrics
 
@@ -556,6 +583,8 @@ def train_classifier(
     device: str = typer.Option("cuda", help="cuda, cpu, or auto."),
     seed: int = typer.Option(42, help="Random seed."),
     log_path: Optional[Path] = typer.Option(None, help="Optional JSONL training log."),
+    history_dir: Optional[Path] = typer.Option(None, help="Directory for JSONL/CSV history."),
+    save_each_epoch: bool = typer.Option(True, help="Save one checkpoint per epoch."),
     resume_checkpoint: Optional[Path] = typer.Option(None, help="Resume model weights."),
     init_bert_checkpoint: Optional[Path] = typer.Option(None, help="MLM checkpoint for BERT init."),
 ) -> None:
@@ -591,9 +620,11 @@ def train_classifier(
     history = []
     best_macro_f1 = -1.0
     output_dir.mkdir(parents=True, exist_ok=True)
+    history_dir = history_dir or (output_dir / "history")
     for epoch in range(epochs):
         metrics = train_classifier_epoch(model, train_loader, optimizer, device_obj)
         metrics["epoch"] = epoch + 1
+        metrics["learning_rate"] = optimizer.param_groups[0]["lr"]
         eval_metrics = None
         if val_path is not None:
             eval_metrics = _evaluate_classifier_model(
@@ -608,7 +639,15 @@ def train_classifier(
                 device=device_obj,
                 output_dir=output_dir / "eval",
             )
-            metrics["val_macro_f1"] = eval_metrics["macro_f1"]
+            metrics.update(
+                {
+                    "val_accuracy": eval_metrics["accuracy"],
+                    "val_macro_precision": eval_metrics["macro_precision"],
+                    "val_macro_recall": eval_metrics["macro_recall"],
+                    "val_macro_f1": eval_metrics["macro_f1"],
+                    "val_weighted_f1": eval_metrics["weighted_f1"],
+                }
+            )
             if eval_metrics["macro_f1"] > best_macro_f1:
                 best_macro_f1 = eval_metrics["macro_f1"]
                 save_checkpoint(
@@ -619,11 +658,27 @@ def train_classifier(
                         "epoch": epoch + 1,
                         "eval_metrics": eval_metrics,
                         "model_config": model.bert.config.to_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
                     },
                 )
         history.append(metrics)
         if log_path is not None:
             append_jsonl(log_path, metrics)
+        write_history_files(history_dir, history)
+        if save_each_epoch:
+            save_epoch_checkpoint(
+                output_dir,
+                epoch + 1,
+                model,
+                optimizer,
+                metrics,
+                history,
+                extra={
+                    "label_map": label_map.as_dict(),
+                    "eval_metrics": eval_metrics,
+                    "model_config": model.bert.config.to_dict(),
+                },
+            )
         typer.echo(json.dumps(metrics, indent=2))
 
     eval_metrics = None
@@ -677,6 +732,8 @@ def train_classifier_config(config: Path = typer.Option(..., help="Classifier tr
         device=raw.get("device", "auto"),
         seed=int(raw.get("seed", 42)),
         log_path=Path(train_cfg["log_path"]) if train_cfg.get("log_path") else None,
+        history_dir=Path(train_cfg["history_dir"]) if train_cfg.get("history_dir") else None,
+        save_each_epoch=bool(train_cfg.get("save_each_epoch", True)),
         resume_checkpoint=Path(train_cfg["resume_checkpoint"])
         if train_cfg.get("resume_checkpoint")
         else None,
@@ -701,6 +758,8 @@ def train_mlm(
     device: str = typer.Option("cuda", help="cuda, cpu, or auto."),
     seed: int = typer.Option(42, help="Random seed."),
     log_path: Optional[Path] = typer.Option(None, help="Optional JSONL training log."),
+    history_dir: Optional[Path] = typer.Option(None, help="Directory for JSONL/CSV history."),
+    save_each_epoch: bool = typer.Option(True, help="Save one checkpoint per epoch."),
     resume_checkpoint: Optional[Path] = typer.Option(None, help="Resume MLM checkpoint."),
 ) -> None:
     """Run MLM pretraining on processed flow data."""
@@ -741,6 +800,7 @@ def train_mlm(
     history = []
     best_loss = float("inf")
     output_dir.mkdir(parents=True, exist_ok=True)
+    history_dir = history_dir or (output_dir / "history")
     for epoch in range(epochs):
         metrics = train_mlm_epoch(
             model=model,
@@ -752,9 +812,11 @@ def train_mlm(
             vocab_size=tokenizer.vocab_size,
         )
         metrics["epoch"] = epoch + 1
+        metrics["learning_rate"] = optimizer.param_groups[0]["lr"]
         history.append(metrics)
         if log_path is not None:
             append_jsonl(log_path, metrics)
+        write_history_files(history_dir, history)
         if metrics["loss"] < best_loss:
             best_loss = metrics["loss"]
             save_checkpoint(
@@ -766,6 +828,16 @@ def train_mlm(
                     "model_config": model.config.to_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                 },
+            )
+        if save_each_epoch:
+            save_epoch_checkpoint(
+                output_dir,
+                epoch + 1,
+                model,
+                optimizer,
+                metrics,
+                history,
+                extra={"model_config": model.config.to_dict()},
             )
         typer.echo(json.dumps(metrics, indent=2))
 
@@ -801,6 +873,8 @@ def train_mlm_config(config: Path = typer.Option(..., help="MLM train YAML.")) -
         device=raw.get("device", "auto"),
         seed=int(raw.get("seed", 42)),
         log_path=Path(train_cfg["log_path"]) if train_cfg.get("log_path") else None,
+        history_dir=Path(train_cfg["history_dir"]) if train_cfg.get("history_dir") else None,
+        save_each_epoch=bool(train_cfg.get("save_each_epoch", True)),
         resume_checkpoint=Path(train_cfg["resume_checkpoint"])
         if train_cfg.get("resume_checkpoint")
         else None,
@@ -825,6 +899,8 @@ def train_neural_baseline(
     device: str = typer.Option("cuda", help="cuda, cpu, or auto."),
     seed: int = typer.Option(42, help="Random seed."),
     log_path: Optional[Path] = typer.Option(None, help="Optional JSONL training log."),
+    history_dir: Optional[Path] = typer.Option(None, help="Directory for JSONL/CSV history."),
+    save_each_epoch: bool = typer.Option(True, help="Save one checkpoint per epoch."),
 ) -> None:
     """Train a neural major-label baseline."""
 
@@ -852,11 +928,14 @@ def train_neural_baseline(
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    history_dir = history_dir or (output_dir / "history")
     history = []
     best_macro_f1 = -1.0
     for epoch in range(epochs):
         metrics = _train_neural_baseline_epoch(model, loader, optimizer, device_obj)
         metrics["epoch"] = epoch + 1
+        metrics["learning_rate"] = optimizer.param_groups[0]["lr"]
+        eval_metrics = None
         if val_path is not None:
             eval_metrics = _eval_neural_baseline(
                 model=model,
@@ -870,7 +949,15 @@ def train_neural_baseline(
                 device=device_obj,
                 output_dir=output_dir / "eval",
             )
-            metrics["val_macro_f1"] = eval_metrics["macro_f1"]
+            metrics.update(
+                {
+                    "val_accuracy": eval_metrics["accuracy"],
+                    "val_macro_precision": eval_metrics["macro_precision"],
+                    "val_macro_recall": eval_metrics["macro_recall"],
+                    "val_macro_f1": eval_metrics["macro_f1"],
+                    "val_weighted_f1": eval_metrics["weighted_f1"],
+                }
+            )
             if eval_metrics["macro_f1"] > best_macro_f1:
                 best_macro_f1 = eval_metrics["macro_f1"]
                 torch.save(
@@ -881,12 +968,30 @@ def train_neural_baseline(
                         "max_length": max_length,
                         "label_map": label_map.as_dict(),
                         "eval_metrics": eval_metrics,
+                        "optimizer_state_dict": optimizer.state_dict(),
                     },
                     output_dir / "neural_baseline.best.pt",
                 )
         history.append(metrics)
         if log_path is not None:
             append_jsonl(log_path, metrics)
+        write_history_files(history_dir, history)
+        if save_each_epoch:
+            save_checkpoint(
+                output_dir / "checkpoints" / f"epoch_{epoch + 1:03d}.pt",
+                model,
+                extra={
+                    "epoch": epoch + 1,
+                    "metrics": metrics,
+                    "history": history,
+                    "model_name": model_name,
+                    "hidden_size": hidden_size,
+                    "max_length": max_length,
+                    "label_map": label_map.as_dict(),
+                    "eval_metrics": eval_metrics,
+                    "optimizer_state_dict": optimizer.state_dict(),
+                },
+            )
         typer.echo(json.dumps(metrics, ensure_ascii=False, indent=2))
 
     torch.save(
@@ -897,6 +1002,7 @@ def train_neural_baseline(
             "max_length": max_length,
             "history": history,
             "label_map": label_map.as_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
         },
         output_dir / "neural_baseline.pt",
     )
