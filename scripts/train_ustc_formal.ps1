@@ -4,6 +4,8 @@ param(
     [string]$ValPath = "data/processed/ustc_tfc2016/split_label_stratified/val.parquet",
     [string]$TestPath = "data/processed/ustc_tfc2016/split_label_stratified/test.parquet",
     [string]$OutputRoot = "artifacts/ustc_formal",
+    [ValidateSet("baseline", "bert-supervised", "bert-mlm", "full")]
+    [string]$Plan = "bert-supervised",
     [string]$View = "payload_only",
     [string]$Device = "auto",
     [int]$Seed = 42,
@@ -20,6 +22,7 @@ param(
     [switch]$SkipClassifier,
     [switch]$RunMlm,
     [switch]$SkipEval,
+    [switch]$SkipAudit,
     [switch]$Resume
 )
 
@@ -54,7 +57,21 @@ try {
 
     New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
 
-    if (-not $SkipBaseline) {
+    if (-not $SkipAudit) {
+        Invoke-Step "Audit processed split" {
+            uv run python scripts/audit_processed_split.py `
+                --train-path $TrainPath `
+                --val-path $ValPath `
+                --test-path $TestPath `
+                --output-path (Join-Path $OutputRoot "split_audit.json")
+        }
+    }
+
+    $DoBaseline = (-not $SkipBaseline) -and (@("baseline", "full") -contains $Plan)
+    $DoMlm = $RunMlm -or (@("bert-mlm", "full") -contains $Plan)
+    $DoClassifier = (-not $SkipClassifier) -and (@("bert-supervised", "bert-mlm", "full") -contains $Plan)
+
+    if ($DoBaseline) {
         $baselineCheckpoint = Join-Path $BaselineDir "neural_baseline.pt"
         if ($Resume -and (Test-Path $baselineCheckpoint)) {
             Write-Host "Skipping CNN baseline; checkpoint exists: $baselineCheckpoint" -ForegroundColor Yellow
@@ -93,7 +110,7 @@ try {
     }
 
     $InitBertArgs = @()
-    if ($RunMlm) {
+    if ($DoMlm) {
         $mlmCheckpoint = Join-Path $MlmDir "mlm.pt"
         if ($Resume -and (Test-Path $mlmCheckpoint)) {
             Write-Host "Skipping MLM; checkpoint exists: $mlmCheckpoint" -ForegroundColor Yellow
@@ -116,7 +133,7 @@ try {
         $InitBertArgs = @("--init-bert-checkpoint", $mlmCheckpoint)
     }
 
-    if (-not $SkipClassifier) {
+    if ($DoClassifier) {
         $classifierCheckpoint = Join-Path $ClassifierDir "classifier.pt"
         if ($Resume -and (Test-Path $classifierCheckpoint)) {
             Write-Host "Skipping classifier; checkpoint exists: $classifierCheckpoint" -ForegroundColor Yellow
