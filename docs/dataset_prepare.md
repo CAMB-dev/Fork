@@ -4,18 +4,17 @@
 
 ## CICIDS2017 Friday Smoke
 
-默认会通过 HuggingFace mirror 下载 Friday PCAP 和 `GeneratedLabelledFlows.zip`，只处理小窗口 smoke 数据：
+默认会通过 `HF_ENDPOINT=https://hf-mirror.com` 下载 Friday PCAP 和 `GeneratedLabelledFlows.zip`，只处理小窗口 smoke 数据：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare_datasets.ps1 `
-  -Dataset cicids2017-friday-smoke `
-  -Proxy http://127.0.0.1:7890
+  -Dataset cicids2017-friday-smoke
 ```
 
 Linux/ROCm 服务器：
 
 ```bash
-PROXY=http://127.0.0.1:7890 DATASET=cicids2017-friday-smoke bash scripts/prepare_datasets.sh
+HF_ENDPOINT=https://hf-mirror.com DATASET=cicids2017-friday-smoke bash scripts/prepare_datasets.sh
 ```
 
 常用参数：
@@ -41,13 +40,14 @@ artifacts/cicids2017_smoke/
 
 ## USTC-TFC2016
 
-USTC 目前没有在脚本中绑定下载直链。先手动把原始数据解压到：
+Linux Bash 脚本会默认从公开 GitHub archive 下载 USTC，并尝试自动解压其中的 `.7z` PCAP 包。服务器需要安装 `unzip`，并建议安装 `7zip` 或 `p7zip-full`：
 
-```text
-data/raw/USTC-TFC2016/extracted/USTC-TFC2016-master/
+```bash
+sudo apt-get update
+sudo apt-get install -y unzip p7zip-full
 ```
 
-然后运行：
+Windows PowerShell 脚本仍主要负责处理已解压目录：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare_datasets.ps1 -Dataset ustc
@@ -83,14 +83,13 @@ Windows：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare_datasets.ps1 `
-  -Dataset all `
-  -Proxy http://127.0.0.1:7890
+  -Dataset all
 ```
 
 Linux：
 
 ```bash
-DATASET=all PROXY=http://127.0.0.1:7890 bash scripts/prepare_datasets.sh
+HF_ENDPOINT=https://hf-mirror.com DATASET=all bash scripts/prepare_datasets.sh
 ```
 
 ## 跳过下载或强制重建

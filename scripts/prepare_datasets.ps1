@@ -2,7 +2,8 @@ param(
     [string]$Workspace = ".",
     [ValidateSet("cicids2017-friday-smoke", "ustc", "all")]
     [string]$Dataset = "cicids2017-friday-smoke",
-    [string]$Proxy = "http://127.0.0.1:7890",
+    [string]$Proxy = "",
+    [string]$HfEndpoint = "https://hf-mirror.com",
     [switch]$SkipDownload,
     [switch]$ForceBuild,
     [switch]$RunSmokeTrain,
@@ -173,6 +174,9 @@ try {
     if ($Proxy) {
         $env:HTTP_PROXY = $Proxy
         $env:HTTPS_PROXY = $Proxy
+    }
+    if ($HfEndpoint) {
+        $env:HF_ENDPOINT = $HfEndpoint
     }
 
     if ($Dataset -in @("cicids2017-friday-smoke", "all")) {

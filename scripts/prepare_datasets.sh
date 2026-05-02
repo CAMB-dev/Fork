@@ -4,6 +4,7 @@ set -euo pipefail
 WORKSPACE="${WORKSPACE:-.}"
 DATASET="${DATASET:-cicids2017-friday-smoke}"
 PROXY="${PROXY:-}"
+HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 SKIP_DOWNLOAD="${SKIP_DOWNLOAD:-0}"
 FORCE_BUILD="${FORCE_BUILD:-0}"
 RUN_SMOKE_TRAIN="${RUN_SMOKE_TRAIN:-0}"
@@ -22,6 +23,7 @@ USTC_SOURCE_SPLIT_DIR="${USTC_SOURCE_SPLIT_DIR:-data/processed/ustc_tfc2016/spli
 UV_BIN="${UV_BIN:-uv}"
 
 cd "${WORKSPACE}"
+export HF_ENDPOINT
 
 run_step() {
   local name="$1"
@@ -58,6 +60,10 @@ audit_split() {
 }
 
 prepare_cicids_friday_smoke() {
+  if [[ "${SKIP_DOWNLOAD}" != "1" ]]; then
+    run_step "Download CICIDS2017 Friday smoke files" \
+      env DATASET=cicids2017-friday-smoke bash scripts/download_datasets.sh
+  fi
   local args=(
     run python scripts/cicids2017_friday_smoke.py
     --max-packets-to-read "${MAX_PACKETS_TO_READ}"
@@ -92,6 +98,9 @@ prepare_cicids_friday_smoke() {
 }
 
 prepare_ustc() {
+  if [[ "${SKIP_DOWNLOAD}" != "1" && ! -d "${USTC_SOURCE_ROOT}" ]]; then
+    run_step "Download USTC-TFC2016" env DATASET=ustc bash scripts/download_datasets.sh
+  fi
   if [[ ! -d "${USTC_SOURCE_ROOT}" ]]; then
     echo "USTC source root not found: ${USTC_SOURCE_ROOT}" >&2
     echo "Place/extract USTC-TFC2016 there or set USTC_SOURCE_ROOT. Skipping USTC." >&2
