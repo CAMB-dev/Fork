@@ -36,7 +36,9 @@ from traffic_bert.data.split import (
 from traffic_bert.data.validate import validation_summary
 from traffic_bert.inference import decode_hierarchical_prediction
 from traffic_bert.labels import LabelMap
-from traffic_bert.metrics import major_classification_metrics, multilabel_f1
+from traffic_bert.metrics import constrain_minor_predictions, major_classification_metrics
+from traffic_bert.metrics import multilabel_f1, multilabel_report_from_predictions
+from traffic_bert.metrics import multilabel_scores_from_predictions
 from traffic_bert.metrics import attack_detection_metrics
 from traffic_bert.metrics import multilabel_classification_report
 from traffic_bert.metrics_io import export_major_metrics, export_minor_metrics
@@ -64,6 +66,7 @@ from traffic_bert.training import (
     resolve_device,
     save_epoch_checkpoint,
     save_checkpoint,
+    StepHistoryWriter,
     train_classifier_epoch,
     train_mlm_epoch,
     write_history_files,
@@ -404,31 +407,77 @@ def _train_neural_baseline_epoch(
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    epoch: int = 1,
+    global_step_start: int = 0,
+    learning_rate: float | None = None,
+    step_writer: StepHistoryWriter | None = None,
 ) -> dict[str, float]:
     model.train()
     total_loss = 0.0
     steps = 0
+    losses = []
+    correct = 0
+    total_examples = 0
+    import time
+
+    started_at = time.perf_counter()
     from traffic_bert.training import rich_train_batches
 
     for batch, progress, task in rich_train_batches(dataloader, "neural-train"):
+        step_started_at = time.perf_counter()
         optimizer.zero_grad(set_to_none=True)
+        labels = batch["major_labels"].to(device)
         logits = model(
             batch["input_ids"].to(device),
             batch["attention_mask"].to(device),
         )
-        loss = torch.nn.functional.cross_entropy(logits, batch["major_labels"].to(device))
+        loss = torch.nn.functional.cross_entropy(logits, labels)
         loss.backward()
         optimizer.step()
         current_loss = float(loss.detach().cpu())
         total_loss += current_loss
         steps += 1
+        losses.append(current_loss)
+        batch_correct = int((logits.argmax(dim=-1) == labels).sum().item())
+        batch_size = int(labels.numel())
+        correct += batch_correct
+        total_examples += batch_size
+        avg_loss = total_loss / max(steps, 1)
+        if step_writer is not None:
+            step_writer.write(
+                {
+                    "epoch": epoch,
+                    "step": steps,
+                    "global_step": global_step_start + steps,
+                    "loss": current_loss,
+                    "avg_loss": avg_loss,
+                    "learning_rate": learning_rate,
+                    "samples_seen": total_examples,
+                    "examples_per_second": batch_size
+                    / max(time.perf_counter() - step_started_at, 1e-12),
+                    "batch_accuracy": batch_correct / max(batch_size, 1),
+                    "running_accuracy": correct / max(total_examples, 1),
+                }
+            )
         progress.update(
             task,
             advance=1,
             current_loss=f"{current_loss:.4f}",
-            avg_loss=f"{total_loss / max(steps, 1):.4f}",
+            avg_loss=f"{avg_loss:.4f}",
         )
-    return {"loss": total_loss / max(steps, 1)}
+    mean_loss = total_loss / max(steps, 1)
+    return {
+        "loss": mean_loss,
+        "train_loss": mean_loss,
+        "train_accuracy": correct / max(total_examples, 1),
+        "final_running_accuracy": correct / max(total_examples, 1),
+        "global_step": global_step_start + steps,
+        "examples_per_second": total_examples / max(time.perf_counter() - started_at, 1e-12),
+        "min_loss": min(losses) if losses else None,
+        "max_loss": max(losses) if losses else None,
+        "last_loss": losses[-1] if losses else None,
+        "mean_step_loss": mean_loss if losses else None,
+    }
 
 
 @torch.no_grad()
@@ -456,17 +505,23 @@ def _eval_neural_baseline(
     model.eval()
     y_true = []
     y_pred = []
+    total_loss = 0.0
+    steps = 0
     from traffic_bert.training import rich_train_batches
 
     for batch, progress, task in rich_train_batches(loader, "neural-eval"):
+        labels = batch["major_labels"].to(device)
         logits = model(
             batch["input_ids"].to(device),
             batch["attention_mask"].to(device),
         )
+        total_loss += float(torch.nn.functional.cross_entropy(logits, labels).detach().cpu())
+        steps += 1
         y_true.extend(batch["major_labels"].tolist())
         y_pred.extend(logits.argmax(dim=-1).cpu().tolist())
         progress.update(task, advance=1)
     metrics = major_classification_metrics(y_true, y_pred, label_map.major_labels)
+    metrics["eval_loss"] = total_loss / max(steps, 1) if steps else None
     if output_dir is not None:
         export_major_metrics(output_dir, metrics, y_true, y_pred, label_map.major_labels)
         from traffic_bert.metrics import attack_detection_metrics
@@ -549,20 +604,44 @@ def _evaluate_classifier_model(
     y_true = outputs["major_labels"].numpy()
     y_pred = outputs["major_logits"].argmax(dim=-1).numpy()
     metrics = major_classification_metrics(y_true, y_pred, label_map.major_labels)
+    metrics["eval_loss"] = outputs["eval_loss"]
     metrics["detection"] = attack_detection_metrics(y_true, y_pred, label_map.major_labels)
+    minor_true = outputs["minor_labels"].numpy()
+    minor_prob = torch.sigmoid(outputs["minor_logits"]).numpy()
+    minor_pred = (minor_prob >= 0.5).astype(int)
     metrics["minor"] = multilabel_f1(
-        outputs["minor_labels"].numpy(),
-        torch.sigmoid(outputs["minor_logits"]).numpy(),
+        minor_true,
+        minor_prob,
+    )
+    constrained_minor_pred = constrain_minor_predictions(
+        minor_pred,
+        y_pred,
+        label_map.minor_major_ids(),
+    )
+    metrics["minor_constrained"] = multilabel_scores_from_predictions(
+        minor_true,
+        constrained_minor_pred,
     )
     minor_report = multilabel_classification_report(
-        outputs["minor_labels"].numpy(),
-        torch.sigmoid(outputs["minor_logits"]).numpy(),
+        minor_true,
+        minor_prob,
+        label_map.minor_labels,
+    )
+    constrained_minor_report = multilabel_report_from_predictions(
+        minor_true,
+        constrained_minor_pred,
         label_map.minor_labels,
     )
     metrics["minor_report"] = minor_report
+    metrics["minor_constrained_report"] = constrained_minor_report
     if output_dir is not None:
         export_major_metrics(output_dir, metrics, y_true.tolist(), y_pred.tolist(), label_map.major_labels)
         export_minor_metrics(output_dir, minor_report, label_map.minor_labels)
+        export_minor_metrics(
+            output_dir / "minor_constrained",
+            constrained_minor_report,
+            label_map.minor_labels,
+        )
         write_json(output_dir / "metrics.json", metrics)
     return metrics
 
@@ -621,10 +700,23 @@ def train_classifier(
     best_macro_f1 = -1.0
     output_dir.mkdir(parents=True, exist_ok=True)
     history_dir = history_dir or (output_dir / "history")
+    step_writer = StepHistoryWriter(history_dir)
+    global_step = 0
     for epoch in range(epochs):
-        metrics = train_classifier_epoch(model, train_loader, optimizer, device_obj)
+        learning_rate_value = optimizer.param_groups[0]["lr"]
+        metrics = train_classifier_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device_obj,
+            epoch=epoch + 1,
+            global_step_start=global_step,
+            learning_rate=learning_rate_value,
+            step_writer=step_writer,
+        )
+        global_step = int(metrics.get("global_step", global_step))
         metrics["epoch"] = epoch + 1
-        metrics["learning_rate"] = optimizer.param_groups[0]["lr"]
+        metrics["learning_rate"] = learning_rate_value
         eval_metrics = None
         if val_path is not None:
             eval_metrics = _evaluate_classifier_model(
@@ -641,6 +733,7 @@ def train_classifier(
             )
             metrics.update(
                 {
+                    "val_loss": eval_metrics["eval_loss"],
                     "val_accuracy": eval_metrics["accuracy"],
                     "val_macro_precision": eval_metrics["macro_precision"],
                     "val_macro_recall": eval_metrics["macro_recall"],
@@ -801,7 +894,10 @@ def train_mlm(
     best_loss = float("inf")
     output_dir.mkdir(parents=True, exist_ok=True)
     history_dir = history_dir or (output_dir / "history")
+    step_writer = StepHistoryWriter(history_dir)
+    global_step = 0
     for epoch in range(epochs):
+        learning_rate_value = optimizer.param_groups[0]["lr"]
         metrics = train_mlm_epoch(
             model=model,
             dataloader=loader,
@@ -810,9 +906,14 @@ def train_mlm(
             special_token_ids=special_token_ids,
             mask_token_id=tokenizer.mask_token_id,
             vocab_size=tokenizer.vocab_size,
+            epoch=epoch + 1,
+            global_step_start=global_step,
+            learning_rate=learning_rate_value,
+            step_writer=step_writer,
         )
+        global_step = int(metrics.get("global_step", global_step))
         metrics["epoch"] = epoch + 1
-        metrics["learning_rate"] = optimizer.param_groups[0]["lr"]
+        metrics["learning_rate"] = learning_rate_value
         history.append(metrics)
         if log_path is not None:
             append_jsonl(log_path, metrics)
@@ -931,10 +1032,23 @@ def train_neural_baseline(
     history_dir = history_dir or (output_dir / "history")
     history = []
     best_macro_f1 = -1.0
+    step_writer = StepHistoryWriter(history_dir)
+    global_step = 0
     for epoch in range(epochs):
-        metrics = _train_neural_baseline_epoch(model, loader, optimizer, device_obj)
+        learning_rate_value = optimizer.param_groups[0]["lr"]
+        metrics = _train_neural_baseline_epoch(
+            model,
+            loader,
+            optimizer,
+            device_obj,
+            epoch=epoch + 1,
+            global_step_start=global_step,
+            learning_rate=learning_rate_value,
+            step_writer=step_writer,
+        )
+        global_step = int(metrics.get("global_step", global_step))
         metrics["epoch"] = epoch + 1
-        metrics["learning_rate"] = optimizer.param_groups[0]["lr"]
+        metrics["learning_rate"] = learning_rate_value
         eval_metrics = None
         if val_path is not None:
             eval_metrics = _eval_neural_baseline(
@@ -951,6 +1065,7 @@ def train_neural_baseline(
             )
             metrics.update(
                 {
+                    "val_loss": eval_metrics["eval_loss"],
                     "val_accuracy": eval_metrics["accuracy"],
                     "val_macro_precision": eval_metrics["macro_precision"],
                     "val_macro_recall": eval_metrics["macro_recall"],

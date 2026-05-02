@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
+import time
 from typing import Any, Iterable
 import torch
 from torch.utils.data import DataLoader
@@ -54,25 +55,96 @@ def _format_loss(value: float | None) -> str:
     return "-" if value is None else f"{value:.4f}"
 
 
+STEP_HISTORY_FIELDS = [
+    "epoch",
+    "step",
+    "global_step",
+    "loss",
+    "avg_loss",
+    "learning_rate",
+    "samples_seen",
+    "examples_per_second",
+    "batch_accuracy",
+    "running_accuracy",
+    "masked_token_accuracy",
+    "masked_tokens",
+]
+
+
+class StepHistoryWriter:
+    """Append per-step metrics to JSONL and CSV history files."""
+
+    def __init__(self, history_dir: str | Path) -> None:
+        self.history_dir = Path(history_dir)
+        self.history_dir.mkdir(parents=True, exist_ok=True)
+        self.jsonl_path = self.history_dir / "steps.jsonl"
+        self.csv_path = self.history_dir / "steps.csv"
+        self._csv_needs_header = not self.csv_path.exists() or self.csv_path.stat().st_size == 0
+
+    def write(self, row: dict[str, Any]) -> None:
+        normalized = {
+            key: (float(value) if isinstance(value, torch.Tensor) else value)
+            for key, value in row.items()
+        }
+        with open(self.jsonl_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(normalized, ensure_ascii=False) + "\n")
+        with open(self.csv_path, "a", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=STEP_HISTORY_FIELDS,
+                extrasaction="ignore",
+            )
+            if self._csv_needs_header:
+                writer.writeheader()
+                self._csv_needs_header = False
+            writer.writerow(normalized)
+
+
+def _step_summary(losses: list[float]) -> dict[str, float | None]:
+    if not losses:
+        return {
+            "min_loss": None,
+            "max_loss": None,
+            "last_loss": None,
+            "mean_step_loss": None,
+        }
+    return {
+        "min_loss": min(losses),
+        "max_loss": max(losses),
+        "last_loss": losses[-1],
+        "mean_step_loss": sum(losses) / len(losses),
+    }
+
+
 def train_classifier_epoch(
     model: torch.nn.Module,
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    epoch: int = 1,
+    global_step_start: int = 0,
+    learning_rate: float | None = None,
+    step_writer: StepHistoryWriter | None = None,
     gradient_clip_norm: float | None = 1.0,
 ) -> dict[str, float]:
     model.train()
     total_loss = 0.0
     steps = 0
+    losses: list[float] = []
+    correct = 0
+    total_examples = 0
+    started_at = time.perf_counter()
     with _progress() as progress:
         task = _add_task(progress, "train", len(dataloader))
         for batch in dataloader:
+            step_started_at = time.perf_counter()
             optimizer.zero_grad(set_to_none=True)
+            major_labels = batch["major_labels"].to(device)
             outputs = model(
                 input_ids=batch["input_ids"].to(device),
                 attention_mask=batch["attention_mask"].to(device),
                 window_mask=batch["window_mask"].to(device),
-                major_labels=batch["major_labels"].to(device),
+                major_labels=major_labels,
                 minor_labels=batch["minor_labels"].to(device),
             )
             loss = outputs["loss"]
@@ -83,13 +155,47 @@ def train_classifier_epoch(
             current_loss = float(loss.detach().cpu())
             total_loss += current_loss
             steps += 1
+            losses.append(current_loss)
+            batch_correct = int((outputs["major_logits"].argmax(dim=-1) == major_labels).sum().item())
+            batch_size = int(major_labels.numel())
+            correct += batch_correct
+            total_examples += batch_size
+            global_step = global_step_start + steps
+            batch_elapsed = max(time.perf_counter() - step_started_at, 1e-12)
+            batch_accuracy = batch_correct / max(batch_size, 1)
+            running_accuracy = correct / max(total_examples, 1)
+            avg_loss = total_loss / max(steps, 1)
+            if step_writer is not None:
+                step_writer.write(
+                    {
+                        "epoch": epoch,
+                        "step": steps,
+                        "global_step": global_step,
+                        "loss": current_loss,
+                        "avg_loss": avg_loss,
+                        "learning_rate": learning_rate,
+                        "samples_seen": total_examples,
+                        "examples_per_second": batch_size / batch_elapsed,
+                        "batch_accuracy": batch_accuracy,
+                        "running_accuracy": running_accuracy,
+                    }
+                )
             progress.update(
                 task,
                 advance=1,
                 current_loss=_format_loss(current_loss),
-                avg_loss=_format_loss(total_loss / max(steps, 1)),
+                avg_loss=_format_loss(avg_loss),
             )
-    return {"loss": total_loss / max(steps, 1)}
+    mean_loss = total_loss / max(steps, 1)
+    return {
+        "loss": mean_loss,
+        "train_loss": mean_loss,
+        "train_accuracy": correct / max(total_examples, 1),
+        "final_running_accuracy": correct / max(total_examples, 1),
+        "global_step": global_step_start + steps,
+        "examples_per_second": total_examples / max(time.perf_counter() - started_at, 1e-12),
+        **_step_summary(losses),
+    }
 
 
 @torch.no_grad()
@@ -97,6 +203,7 @@ def collect_classifier_outputs(
     model: torch.nn.Module,
     dataloader: DataLoader,
     device: torch.device,
+    compute_loss: bool = True,
 ) -> dict[str, list]:
     model.eval()
     major_logits: list[torch.Tensor] = []
@@ -104,15 +211,24 @@ def collect_classifier_outputs(
     major_labels: list[torch.Tensor] = []
     minor_labels: list[torch.Tensor] = []
     flow_ids: list[str] = []
+    total_loss = 0.0
+    steps = 0
 
     with _progress() as progress:
         task = _add_task(progress, "eval", len(dataloader))
         for batch in dataloader:
+            batch_major_labels = batch["major_labels"].to(device)
+            batch_minor_labels = batch["minor_labels"].to(device)
             outputs = model(
                 input_ids=batch["input_ids"].to(device),
                 attention_mask=batch["attention_mask"].to(device),
                 window_mask=batch["window_mask"].to(device),
+                major_labels=batch_major_labels if compute_loss else None,
+                minor_labels=batch_minor_labels if compute_loss else None,
             )
+            if compute_loss and "loss" in outputs:
+                total_loss += float(outputs["loss"].detach().cpu())
+                steps += 1
             major_logits.append(outputs["major_logits"].cpu())
             minor_logits.append(outputs["minor_logits"].cpu())
             major_labels.append(batch["major_labels"].cpu())
@@ -126,6 +242,7 @@ def collect_classifier_outputs(
         "major_labels": torch.cat(major_labels) if major_labels else torch.empty(0),
         "minor_labels": torch.cat(minor_labels) if minor_labels else torch.empty(0),
         "flow_ids": flow_ids,
+        "eval_loss": total_loss / max(steps, 1) if steps else None,
     }
 
 
@@ -168,7 +285,10 @@ def write_history_files(history_dir: str | Path, history: list[dict[str, Any]]) 
     preferred = [
         "epoch",
         "loss",
+        "train_loss",
+        "train_accuracy",
         "learning_rate",
+        "val_loss",
         "val_accuracy",
         "val_macro_precision",
         "val_macro_recall",
@@ -250,16 +370,26 @@ def train_mlm_epoch(
     special_token_ids: set[int],
     mask_token_id: int,
     vocab_size: int,
+    epoch: int = 1,
+    global_step_start: int = 0,
+    learning_rate: float | None = None,
+    step_writer: StepHistoryWriter | None = None,
     mlm_probability: float = 0.15,
     gradient_clip_norm: float | None = 1.0,
 ) -> dict[str, float]:
     model.train()
     total_loss = 0.0
     steps = 0
+    losses: list[float] = []
+    total_masked_tokens = 0
+    total_masked_correct = 0
+    total_examples = 0
+    started_at = time.perf_counter()
 
     with _progress() as progress:
         task = _add_task(progress, "mlm-train", len(dataloader))
         for batch in dataloader:
+            step_started_at = time.perf_counter()
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             window_mask = batch["window_mask"].to(device)
@@ -297,14 +427,51 @@ def train_mlm_epoch(
             current_loss = float(loss.detach().cpu())
             total_loss += current_loss
             steps += 1
+            losses.append(current_loss)
+            masked = labels != -100
+            masked_tokens = int(masked.sum().item())
+            masked_correct = (
+                int((outputs.logits.argmax(dim=-1)[masked] == labels[masked]).sum().item())
+                if masked_tokens
+                else 0
+            )
+            total_masked_tokens += masked_tokens
+            total_masked_correct += masked_correct
+            total_examples += int(batch["major_labels"].numel())
+            avg_loss = total_loss / max(steps, 1)
+            batch_elapsed = max(time.perf_counter() - step_started_at, 1e-12)
+            if step_writer is not None:
+                step_writer.write(
+                    {
+                        "epoch": epoch,
+                        "step": steps,
+                        "global_step": global_step_start + steps,
+                        "loss": current_loss,
+                        "avg_loss": avg_loss,
+                        "learning_rate": learning_rate,
+                        "samples_seen": total_examples,
+                        "examples_per_second": int(batch["major_labels"].numel()) / batch_elapsed,
+                        "masked_token_accuracy": masked_correct / max(masked_tokens, 1),
+                        "masked_tokens": masked_tokens,
+                    }
+                )
             progress.update(
                 task,
                 advance=1,
                 current_loss=_format_loss(current_loss),
-                avg_loss=_format_loss(total_loss / max(steps, 1)),
+                avg_loss=_format_loss(avg_loss),
             )
 
-    return {"loss": total_loss / max(steps, 1)}
+    mean_loss = total_loss / max(steps, 1)
+    return {
+        "loss": mean_loss,
+        "train_loss": mean_loss,
+        "masked_token_accuracy": total_masked_correct / max(total_masked_tokens, 1),
+        "masked_tokens": total_masked_tokens,
+        "global_step": global_step_start + steps,
+        "examples_per_second": total_examples / max(time.perf_counter() - started_at, 1e-12),
+        **_step_summary(losses),
+    }
 
 
 def rich_train_batches(
