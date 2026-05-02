@@ -13,6 +13,7 @@ param(
     [int]$MaxPacketsToSkip = 0,
     [int]$MaxPacketsPerFlow = 16,
     [int]$MaxPerMajor = 2000,
+    [string]$LabelFileContains = "",
     [string]$StartTime = "",
     [string]$EndTime = "",
     [string]$UstcSourceRoot = "data\raw\USTC-TFC2016\extracted\USTC-TFC2016-master",
@@ -88,6 +89,9 @@ function Invoke-CicidsFridaySmoke {
     }
     if ($EndTime) {
         $argsList += @("--end-time", $EndTime)
+    }
+    if ($LabelFileContains) {
+        $argsList += @("--label-file-contains", $LabelFileContains)
     }
     if ($SkipDownload) {
         $argsList += "--skip-download"

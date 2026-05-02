@@ -14,6 +14,7 @@ MAX_PACKETS_TO_READ="${MAX_PACKETS_TO_READ:-250000}"
 MAX_PACKETS_TO_SKIP="${MAX_PACKETS_TO_SKIP:-0}"
 MAX_PACKETS_PER_FLOW="${MAX_PACKETS_PER_FLOW:-16}"
 MAX_PER_MAJOR="${MAX_PER_MAJOR:-2000}"
+LABEL_FILE_CONTAINS="${LABEL_FILE_CONTAINS:-}"
 START_TIME="${START_TIME:-}"
 END_TIME="${END_TIME:-}"
 USTC_SOURCE_ROOT="${USTC_SOURCE_ROOT:-data/raw/USTC-TFC2016/extracted/USTC-TFC2016-master}"
@@ -76,6 +77,9 @@ prepare_cicids_friday_smoke() {
   fi
   if [[ -n "${END_TIME}" ]]; then
     args+=(--end-time "${END_TIME}")
+  fi
+  if [[ -n "${LABEL_FILE_CONTAINS}" ]]; then
+    args+=(--label-file-contains "${LABEL_FILE_CONTAINS}")
   fi
   if [[ "${SKIP_DOWNLOAD}" == "1" ]]; then
     args+=(--skip-download)
