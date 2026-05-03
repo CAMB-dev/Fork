@@ -91,12 +91,16 @@ def audit(train_path: Path, val_path: Path, test_path: Path) -> dict:
     for pair, item in overlap.items():
         if item["count"] > 0:
             warnings.append(f"source_file overlap detected in {pair}: {item['count']}")
+    if len(all_major_labels) < 2:
+        label_text = ", ".join(all_major_labels) if all_major_labels else "none"
+        warnings.append(f"fewer than 2 major labels across all splits: {label_text}")
     for split, missing in missing_major_by_split.items():
         if missing:
             warnings.append(f"{split} is missing major labels: {', '.join(missing)}")
 
     return {
         "splits": {split: _split_summary(frame) for split, frame in frames.items()},
+        "all_major_labels": all_major_labels,
         "source_file_overlap": overlap,
         "missing_major_by_split": missing_major_by_split,
         "warnings": warnings,
