@@ -103,7 +103,7 @@ prepare_cicids_friday_smoke() {
 
 prepare_ustc() {
   if [[ "${SKIP_DOWNLOAD}" != "1" && ! -d "${USTC_SOURCE_ROOT}" ]]; then
-    run_step "Download USTC-TFC2016" env DATASET=ustc bash scripts/download_datasets.sh
+    run_step "Download USTC-TFC2016" env DATASET=ustc_tfc2016 bash scripts/download_datasets.sh
   fi
   if [[ ! -d "${USTC_SOURCE_ROOT}" ]]; then
     echo "USTC source root not found: ${USTC_SOURCE_ROOT}" >&2
@@ -200,7 +200,7 @@ case "${DATASET}" in
   cicids2017-friday-smoke)
     prepare_cicids_friday_smoke
     ;;
-  ustc)
+  ustc|ustc_tfc2016)
     prepare_ustc
     ;;
   all)
@@ -208,7 +208,7 @@ case "${DATASET}" in
     prepare_ustc
     ;;
   *)
-    echo "Unsupported DATASET=${DATASET}. Use cicids2017-friday-smoke, ustc, or all." >&2
+    echo "Unsupported DATASET=${DATASET}. Use cicids2017-friday-smoke, ustc_tfc2016, ustc, or all." >&2
     exit 1
     ;;
 esac

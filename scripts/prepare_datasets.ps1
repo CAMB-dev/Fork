@@ -1,6 +1,6 @@
 param(
     [string]$Workspace = ".",
-    [ValidateSet("cicids2017-friday-smoke", "ustc", "all")]
+    [ValidateSet("cicids2017-friday-smoke", "ustc_tfc2016", "ustc", "all")]
     [string]$Dataset = "cicids2017-friday-smoke",
     [string]$Proxy = "",
     [string]$HfEndpoint = "https://hf-mirror.com",
@@ -186,7 +186,7 @@ try {
     if ($Dataset -in @("cicids2017-friday-smoke", "all")) {
         Invoke-CicidsFridaySmoke
     }
-    if ($Dataset -in @("ustc", "all")) {
+    if ($Dataset -in @("ustc_tfc2016", "ustc", "all")) {
         Invoke-UstcPipeline
     }
 }

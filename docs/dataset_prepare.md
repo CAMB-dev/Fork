@@ -59,13 +59,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare_datasets.ps1
 Linux/ROCm 服务器：
 
 ```bash
-DATASET=ustc bash scripts/prepare_datasets.sh
+DATASET=ustc_tfc2016 bash scripts/prepare_datasets.sh
 ```
 
 如果解压目录不同：
 
 ```bash
-USTC_SOURCE_ROOT=/data/USTC-TFC2016-master DATASET=ustc bash scripts/prepare_datasets.sh
+USTC_SOURCE_ROOT=/data/USTC-TFC2016-master DATASET=ustc_tfc2016 bash scripts/prepare_datasets.sh
 ```
 
 输出：
@@ -79,6 +79,35 @@ artifacts/ustc_tfc2016/
 ```
 
 `split_label_stratified` 适合主训练 sanity，但存在同源风险；`split_source_file` 用于文件级泛化对照，可能出现 val/test 类别缺失。每次运行都会通过 `scripts/audit_processed_split.py` 输出 audit 报告。
+
+## 5090/CUDA 从零运行
+
+Linux CUDA 服务器上先安装系统解压工具，再下载和预处理 USTC-TFC2016：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y unzip p7zip-full
+
+DATASET=ustc_tfc2016 bash scripts/download_datasets.sh
+DATASET=ustc_tfc2016 bash scripts/prepare_datasets.sh
+```
+
+严格 source-file split 的 supervised BERT 训练：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+PLAN=bert-supervised \
+TRAIN_PATH=data/processed/ustc_tfc2016/split_source_file/train.parquet \
+VAL_PATH=data/processed/ustc_tfc2016/split_source_file/val.parquet \
+TEST_PATH=data/processed/ustc_tfc2016/split_source_file/test.parquet \
+OUTPUT_ROOT=artifacts/ustc_bert_source_file_cuda \
+CLASSIFIER_EPOCHS=3 \
+CLASSIFIER_BATCH_SIZE=16 \
+MAX_LENGTH=512 \
+MAX_WINDOWS=2 \
+DEVICE=auto \
+bash scripts/train_ustc_formal_cuda.sh
+```
 
 ## 全部处理
 

@@ -48,7 +48,7 @@ extract_7z_archives() {
     seven_zip="7z"
   else
     echo "7z/7zz not found; nested USTC .7z archives were not extracted." >&2
-    echo "Install p7zip-full or 7zip, then rerun DATASET=ustc bash scripts/download_datasets.sh." >&2
+    echo "Install p7zip-full or 7zip, then rerun DATASET=ustc_tfc2016 bash scripts/download_datasets.sh." >&2
     return 0
   fi
 
@@ -116,7 +116,7 @@ case "${DATASET}" in
   cicids2017-friday-smoke|cicids2017)
     download_cicids_friday
     ;;
-  ustc)
+  ustc|ustc_tfc2016)
     download_ustc
     ;;
   all)
@@ -124,7 +124,7 @@ case "${DATASET}" in
     download_ustc
     ;;
   *)
-    echo "Unsupported DATASET=${DATASET}. Use cicids2017-friday-smoke, cicids2017, ustc, or all." >&2
+    echo "Unsupported DATASET=${DATASET}. Use cicids2017-friday-smoke, cicids2017, ustc_tfc2016, ustc, or all." >&2
     exit 1
     ;;
 esac
