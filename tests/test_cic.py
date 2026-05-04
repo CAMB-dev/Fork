@@ -10,6 +10,15 @@ def test_canonical_flow_key_is_bidirectional() -> None:
     assert left == right
 
 
+def test_canonical_flow_key_normalizes_float_protocol_values() -> None:
+    tcp_int = canonical_flow_key("10.0.0.1", "10.0.0.2", 1234, 80, 6)
+    tcp_float = canonical_flow_key("10.0.0.1", "10.0.0.2", 1234, 80, 6.0)
+    udp_text_float = canonical_flow_key("10.0.0.1", "10.0.0.2", 1234, 53, "17.0")
+
+    assert tcp_float == tcp_int
+    assert udp_text_float[0] == "udp"
+
+
 def test_cic_flow_label_index_lookup() -> None:
     frame = pd.DataFrame(
         [
@@ -27,4 +36,3 @@ def test_cic_flow_label_index_lookup() -> None:
     index = CicFlowLabelIndex.from_frame(frame)
 
     assert index.lookup("10.0.0.2", "10.0.0.1", 80, 1234, "tcp") == "DoS Hulk"
-

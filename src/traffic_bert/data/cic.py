@@ -30,10 +30,14 @@ def canonical_flow_key(
     dst_port: int,
     protocol: str | int,
 ) -> tuple[str, str, str]:
-    proto = str(protocol).lower()
-    if proto in {"6", "tcp"}:
+    proto = str(protocol).strip().lower()
+    try:
+        proto_number = int(float(proto))
+    except ValueError:
+        proto_number = None
+    if proto in {"tcp"} or proto_number == 6:
         proto = "tcp"
-    elif proto in {"17", "udp"}:
+    elif proto in {"udp"} or proto_number == 17:
         proto = "udp"
     left = f"{src_ip}:{int(src_port)}"
     right = f"{dst_ip}:{int(dst_port)}"
