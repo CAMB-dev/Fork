@@ -139,7 +139,9 @@ def build_processed_dataset(config: BuildConfig) -> dict:
     if config.label_source == "cic_csv":
         if config.label_csv_path is None:
             raise ValueError("label_source=cic_csv requires label_csv_path")
-        cic_index = CicFlowLabelIndex.from_frame(pd.read_csv(config.label_csv_path))
+        cic_index = CicFlowLabelIndex.from_frame(
+            pd.read_csv(config.label_csv_path, low_memory=False)
+        )
 
     rows: list[dict] = []
     raw_files = collect_pcap_files(config.input_path)
