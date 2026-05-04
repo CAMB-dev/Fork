@@ -33,23 +33,28 @@ from traffic_bert.data.validate import validation_summary
 class CicidsJob:
     slug: str
     pcap_name: str
-    csv_contains: str
+    csv_contains: tuple[str, ...]
     attack_labels: tuple[str, ...]
 
 
 JOBS = (
-    CicidsJob("monday_benign", "Monday-WorkingHours.pcap", "Monday", ()),
-    CicidsJob("tuesday_patator", "Tuesday-WorkingHours.pcap", "Tuesday", ("FTP-Patator", "SSH-Patator")),
+    CicidsJob("monday_benign", "Monday-WorkingHours.pcap", ("Monday",), ()),
+    CicidsJob(
+        "tuesday_patator",
+        "Tuesday-WorkingHours.pcap",
+        ("Tuesday",),
+        ("FTP-Patator", "SSH-Patator"),
+    ),
     CicidsJob(
         "wednesday_dos",
         "Wednesday-workingHours.pcap",
-        "Wednesday",
+        ("Wednesday",),
         ("DoS Hulk", "DoS GoldenEye", "DoS slowloris", "DoS Slowhttptest", "Heartbleed"),
     ),
     CicidsJob(
         "thursday_web",
         "Thursday-WorkingHours.pcap",
-        "WebAttacks",
+        ("Thursday", "WebAttacks"),
         (
             "Web Attack \x96 Brute Force",
             "Web Attack \x96 XSS",
@@ -59,22 +64,28 @@ JOBS = (
     CicidsJob(
         "thursday_infiltration",
         "Thursday-WorkingHours.pcap",
-        "Infilteration",
+        ("Thursday", "Infilteration"),
         ("Infiltration",),
     ),
-    CicidsJob("friday_bot", "Friday-WorkingHours.pcap", "Morning", ("Bot",)),
-    CicidsJob("friday_portscan", "Friday-WorkingHours.pcap", "PortScan", ("PortScan",)),
-    CicidsJob("friday_ddos", "Friday-WorkingHours.pcap", "DDos", ("DDoS",)),
+    CicidsJob("friday_bot", "Friday-WorkingHours.pcap", ("Friday", "Morning"), ("Bot",)),
+    CicidsJob(
+        "friday_portscan",
+        "Friday-WorkingHours.pcap",
+        ("Friday", "PortScan"),
+        ("PortScan",),
+    ),
+    CicidsJob("friday_ddos", "Friday-WorkingHours.pcap", ("Friday", "DDos"), ("DDoS",)),
 )
 
 
-def _find_csv_name(label_zip: Path, filename_contains: str) -> str:
-    needle = filename_contains.lower()
+def _find_csv_name(label_zip: Path, filename_contains: tuple[str, ...]) -> str:
+    needles = tuple(item.lower() for item in filename_contains)
     with zipfile.ZipFile(label_zip) as archive:
         matches = [
             name
             for name in archive.namelist()
-            if name.lower().endswith(".csv") and needle in Path(name).name.lower()
+            if name.lower().endswith(".csv")
+            and all(needle in Path(name).name.lower() for needle in needles)
         ]
     if not matches:
         raise FileNotFoundError(f"no CSV containing {filename_contains!r} in {label_zip}")
