@@ -124,11 +124,11 @@ def _extract_label_file(
     label_col = _label_column(frame)
     ts_col = _timestamp_column(frame)
 
+    timestamps = _parse_cicids_timestamps(frame[ts_col], csv_name)
+    frame[ts_col] = timestamps.dt.strftime("%Y-%m-%d %H:%M:%S")
     labels_dir.mkdir(parents=True, exist_ok=True)
     output_path = labels_dir / f"friday_labelled_flows_{job.slug}.csv"
     frame.to_csv(output_path, index=False)
-
-    timestamps = _parse_cicids_timestamps(frame[ts_col], csv_name)
     attack_mask = frame[label_col].isin(job.attack_labels)
     attack_times = timestamps[attack_mask & timestamps.notna()]
     if attack_times.empty:

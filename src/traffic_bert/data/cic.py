@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
@@ -53,11 +53,24 @@ def parse_cic_timestamp(value: Any) -> pd.Timestamp | None:
     if isinstance(value, datetime):
         return pd.Timestamp(value)
     text = str(value).strip()
-    for dayfirst in (False, True):
+    for dayfirst in (True, False):
         parsed = pd.to_datetime(text, errors="coerce", dayfirst=dayfirst)
         if not pd.isna(parsed):
             return pd.Timestamp(parsed)
     return None
+
+
+def normalize_lookup_timestamp(value: Any) -> pd.Timestamp | None:
+    if value is None or pd.isna(value):
+        return None
+    if isinstance(value, pd.Timestamp):
+        return value.tz_localize(None) if value.tzinfo is not None else value
+    if isinstance(value, datetime):
+        timestamp = pd.Timestamp(value)
+        return timestamp.tz_localize(None) if timestamp.tzinfo is not None else timestamp
+    if isinstance(value, int | float):
+        return pd.Timestamp.fromtimestamp(float(value), tz=timezone.utc).tz_localize(None)
+    return parse_cic_timestamp(value)
 
 
 @dataclass(frozen=True)
@@ -106,7 +119,7 @@ class CicFlowLabelIndex:
         if "protocol" not in work:
             work["protocol"] = ""
         if "timestamp" in work:
-            timestamps = pd.to_datetime(work["timestamp"], errors="coerce")
+            timestamps = work["timestamp"].map(parse_cic_timestamp)
         else:
             timestamps = pd.Series([pd.NaT] * len(work), index=work.index)
 
@@ -117,7 +130,7 @@ class CicFlowLabelIndex:
             strict=True,
         ):
             data = row._asdict()
-            timestamp = None if pd.isna(timestamp_value) else pd.Timestamp(timestamp_value)
+            timestamp = normalize_lookup_timestamp(timestamp_value)
             records.append(
                 CicLabelRecord(
                     key=canonical_flow_key(
@@ -140,16 +153,20 @@ class CicFlowLabelIndex:
         src_port: int,
         dst_port: int,
         protocol: str | int,
-        timestamp: pd.Timestamp | None = None,
+        timestamp: Any = None,
     ) -> str | None:
         key = canonical_flow_key(src_ip, dst_ip, src_port, dst_port, protocol)
         candidates = self.by_key.get(key, [])
         if not candidates:
             return None
-        if timestamp is None or len(candidates) == 1:
+        lookup_timestamp = normalize_lookup_timestamp(timestamp)
+        if lookup_timestamp is None or len(candidates) == 1:
             return candidates[0].label
         candidates_with_time = [item for item in candidates if item.timestamp is not None]
         if not candidates_with_time:
             return candidates[0].label
-        best = min(candidates_with_time, key=lambda item: abs(item.timestamp - timestamp))
+        best = min(
+            candidates_with_time,
+            key=lambda item: abs(item.timestamp - lookup_timestamp),
+        )
         return best.label
