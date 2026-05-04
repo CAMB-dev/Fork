@@ -3,6 +3,7 @@ import pandas as pd
 from traffic_bert.data.split import (
     assign_file_time_split,
     assign_stratified_hash_split,
+    assign_time_ordered_split,
     processed_stats,
     stratified_sample,
 )
@@ -65,6 +66,32 @@ def test_assign_stratified_hash_split_keeps_groups_and_labels_present() -> None:
     counts = result.groupby(["source_label", "split"]).size().unstack(fill_value=0)
     assert set(counts.columns) == {"train", "val", "test"}
     assert (counts > 0).all().all()
+
+
+def test_assign_time_ordered_split_orders_within_each_label() -> None:
+    frame = pd.DataFrame(
+        {
+            "flow_id": [f"{label}-{idx}" for label in ["a", "b"] for idx in range(10)],
+            "source_label": [label for label in ["a", "b"] for _ in range(10)],
+            "start_time": list(range(10)) + list(range(100, 110)),
+        }
+    )
+
+    result = assign_time_ordered_split(
+        frame,
+        group_column="flow_id",
+        stratify_column="source_label",
+        time_column="start_time",
+    )
+
+    assert result.groupby("flow_id")["split"].nunique().max() == 1
+    for _, group in result.groupby("source_label"):
+        train_max = group[group["split"] == "train"]["start_time"].max()
+        val_min = group[group["split"] == "val"]["start_time"].min()
+        val_max = group[group["split"] == "val"]["start_time"].max()
+        test_min = group[group["split"] == "test"]["start_time"].min()
+        assert train_max < val_min
+        assert val_max < test_min
 
 
 def test_stratified_sample_caps_each_class() -> None:

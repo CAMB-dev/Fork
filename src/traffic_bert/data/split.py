@@ -111,6 +111,77 @@ def assign_stratified_hash_split(
     return output
 
 
+def assign_time_ordered_split(
+    frame: pd.DataFrame,
+    train_ratio: float = 0.7,
+    val_ratio: float = 0.15,
+    group_column: str = "flow_id",
+    stratify_column: str = "source_label",
+    time_column: str = "start_time",
+) -> pd.DataFrame:
+    """Assign train/val/test by time order within each label stratum.
+
+    Groups are ordered by ``time_column`` within each ``stratify_column`` value,
+    then sliced by ratio. This gives a stricter split than random flow hashing
+    while still keeping rare labels represented when enough groups exist.
+    """
+
+    if train_ratio <= 0 or val_ratio < 0 or train_ratio + val_ratio >= 1:
+        raise ValueError("ratios must satisfy train_ratio > 0, val_ratio >= 0, sum < 1")
+    for column in [group_column, stratify_column, time_column]:
+        if column not in frame.columns:
+            raise KeyError(f"missing column: {column}")
+
+    output = frame.copy()
+    group_frame = (
+        output[[group_column, stratify_column, time_column]]
+        .sort_values([time_column, group_column], kind="mergesort")
+        .drop_duplicates(subset=[group_column])
+        .copy()
+    )
+    group_frame["_bucket"] = [
+        stable_bucket(f"{stratum}:{group}")
+        for stratum, group in zip(
+            group_frame[stratify_column],
+            group_frame[group_column],
+            strict=True,
+        )
+    ]
+
+    group_to_split: dict[str, str] = {}
+    for _, stratum_groups in group_frame.groupby(stratify_column, sort=False):
+        ordered = stratum_groups.sort_values(
+            [time_column, "_bucket", group_column],
+            kind="mergesort",
+        )
+        count = len(ordered)
+        if count == 1:
+            split_names = ["train"]
+        elif count == 2:
+            split_names = ["train", "test"]
+        else:
+            train_count = max(1, int(count * train_ratio))
+            val_count = max(1, int(count * val_ratio))
+            test_count = count - train_count - val_count
+            while test_count < 1 and train_count > 1:
+                train_count -= 1
+                test_count += 1
+            while test_count < 1 and val_count > 1:
+                val_count -= 1
+                test_count += 1
+            train_count += count - (train_count + val_count + test_count)
+            split_names = (
+                ["train"] * train_count
+                + ["val"] * val_count
+                + ["test"] * test_count
+            )
+        for group, split_name in zip(ordered[group_column], split_names, strict=True):
+            group_to_split[str(group)] = split_name
+
+    output["split"] = [group_to_split[str(value)] for value in output[group_column]]
+    return output
+
+
 def stratified_sample(
     frame: pd.DataFrame,
     stratify_column: str = "major_label",
