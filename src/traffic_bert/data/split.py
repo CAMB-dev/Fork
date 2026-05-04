@@ -182,6 +182,121 @@ def assign_time_ordered_split(
     return output
 
 
+def assign_time_block_split(
+    frame: pd.DataFrame,
+    train_ratio: float = 0.7,
+    val_ratio: float = 0.15,
+    group_column: str = "flow_id",
+    stratify_column: str = "source_label",
+    time_column: str = "start_time",
+    block_size: int = 512,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """Assign splits by shuffled contiguous time blocks within each label.
+
+    This is a compromise between random flow splitting and strict time-ordered
+    splitting: nearby flows stay in the same block, but blocks are distributed
+    across train/val/test to cover different time ranges in each split.
+    """
+
+    if train_ratio <= 0 or val_ratio < 0 or train_ratio + val_ratio >= 1:
+        raise ValueError("ratios must satisfy train_ratio > 0, val_ratio >= 0, sum < 1")
+    if block_size <= 0:
+        raise ValueError("block_size must be positive")
+    for column in [group_column, stratify_column, time_column]:
+        if column not in frame.columns:
+            raise KeyError(f"missing column: {column}")
+
+    output = frame.copy()
+    group_frame = (
+        output[[group_column, stratify_column, time_column]]
+        .sort_values([stratify_column, time_column, group_column], kind="mergesort")
+        .drop_duplicates(subset=[group_column])
+        .copy()
+    )
+
+    group_to_split: dict[str, str] = {}
+    for stratum, stratum_groups in group_frame.groupby(stratify_column, sort=False):
+        ordered = stratum_groups.sort_values([time_column, group_column], kind="mergesort")
+        count = len(ordered)
+        if count == 1:
+            group_to_split[str(ordered.iloc[0][group_column])] = "train"
+            continue
+        if count == 2:
+            group_to_split[str(ordered.iloc[0][group_column])] = "train"
+            group_to_split[str(ordered.iloc[1][group_column])] = "test"
+            continue
+
+        effective_block_size = min(block_size, max(1, count // 3))
+        work = ordered.copy()
+        work["_block"] = [idx // effective_block_size for idx in range(count)]
+        block_frame = (
+            work.groupby("_block", sort=True)
+            .agg(
+                size=(group_column, "size"),
+                first_time=(time_column, "min"),
+            )
+            .reset_index()
+        )
+        block_frame["_shuffle"] = [
+            stable_bucket(f"{seed}:{stratum}:{block_id}")
+            for block_id in block_frame["_block"]
+        ]
+        block_frame = block_frame.sort_values(
+            ["_shuffle", "first_time", "_block"],
+            kind="mergesort",
+        )
+
+        train_target = max(1, int(count * train_ratio))
+        val_target = max(1, int(count * val_ratio))
+        test_target = count - train_target - val_target
+        while test_target < 1 and train_target > 1:
+            train_target -= 1
+            test_target += 1
+        while test_target < 1 and val_target > 1:
+            val_target -= 1
+            test_target += 1
+
+        block_to_split: dict[int, str] = {}
+        assigned = {"train": 0, "val": 0, "test": 0}
+        targets = {
+            "train": train_target,
+            "val": val_target,
+            "test": test_target,
+        }
+        block_rows = list(
+            block_frame.itertuples(
+                index=False,
+                name=None,
+            )
+        )
+        required_splits = ["train", "val", "test"] if len(block_rows) >= 3 else []
+        for row_index, (block_id, size, _first_time, _shuffle) in enumerate(block_rows):
+            size = int(size)
+            if row_index < len(required_splits):
+                split_name = required_splits[row_index]
+            else:
+                deficits = {
+                    split: targets[split] - assigned[split]
+                    for split in ["train", "val", "test"]
+                }
+                split_name = max(
+                    deficits,
+                    key=lambda split: (deficits[split], -assigned[split]),
+                )
+            block_to_split[int(block_id)] = split_name
+            assigned[split_name] += size
+
+        for group, block_id in work[[group_column, "_block"]].itertuples(
+            index=False,
+            name=None,
+        ):
+            group_to_split[str(group)] = block_to_split[int(block_id)]
+
+    output["split"] = [group_to_split[str(value)] for value in output[group_column]]
+    return output
+
+
 def stratified_sample(
     frame: pd.DataFrame,
     stratify_column: str = "major_label",

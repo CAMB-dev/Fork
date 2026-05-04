@@ -3,6 +3,7 @@ import pandas as pd
 from traffic_bert.data.split import (
     assign_file_time_split,
     assign_stratified_hash_split,
+    assign_time_block_split,
     assign_time_ordered_split,
     processed_stats,
     stratified_sample,
@@ -92,6 +93,34 @@ def test_assign_time_ordered_split_orders_within_each_label() -> None:
         test_min = group[group["split"] == "test"]["start_time"].min()
         assert train_max < val_min
         assert val_max < test_min
+
+
+def test_assign_time_block_split_keeps_nearby_blocks_together() -> None:
+    frame = pd.DataFrame(
+        {
+            "flow_id": [f"{label}-{idx}" for label in ["a", "b"] for idx in range(12)],
+            "source_label": [label for label in ["a", "b"] for _ in range(12)],
+            "start_time": list(range(12)) + list(range(100, 112)),
+        }
+    )
+
+    result = assign_time_block_split(
+        frame,
+        group_column="flow_id",
+        stratify_column="source_label",
+        time_column="start_time",
+        block_size=3,
+        seed=7,
+    )
+
+    assert result.groupby("flow_id")["split"].nunique().max() == 1
+    for _, group in result.groupby("source_label"):
+        counts = group["split"].value_counts()
+        assert {"train", "val", "test"} <= set(counts.index)
+        group = group.sort_values("start_time")
+        block_ids = list(range(len(group)))
+        group = group.assign(block=[idx // 3 for idx in block_ids])
+        assert group.groupby("block")["split"].nunique().max() == 1
 
 
 def test_stratified_sample_caps_each_class() -> None:
