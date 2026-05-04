@@ -87,6 +87,36 @@ for filename in ["pcaps/Friday-WorkingHours.pcap", "csvs/GeneratedLabelledFlows.
 PY
 }
 
+download_cicids_all() {
+  echo "== Download CICIDS2017 all working-hour PCAPs via HuggingFace =="
+  echo "HF_ENDPOINT=${HF_ENDPOINT}"
+  "${UV_BIN}" run python - <<'PY'
+import os
+from pathlib import Path
+
+from huggingface_hub import hf_hub_download
+
+repo_id = os.environ.get("HF_REPO_ID", "bencorn/CICIDS2017")
+raw_dir = Path(os.environ.get("CICIDS_RAW_DIR", "data/raw/CICIDS2017"))
+raw_dir.mkdir(parents=True, exist_ok=True)
+for filename in [
+    "csvs/GeneratedLabelledFlows.zip",
+    "pcaps/Monday-WorkingHours.pcap",
+    "pcaps/Tuesday-WorkingHours.pcap",
+    "pcaps/Wednesday-workingHours.pcap",
+    "pcaps/Thursday-WorkingHours.pcap",
+    "pcaps/Friday-WorkingHours.pcap",
+]:
+    path = hf_hub_download(
+        repo_id=repo_id,
+        filename=filename,
+        repo_type="dataset",
+        local_dir=raw_dir,
+    )
+    print(path)
+PY
+}
+
 download_ustc() {
   echo "== Download USTC-TFC2016 =="
   echo "USTC_SOURCE_URL=${USTC_SOURCE_URL}"
@@ -115,6 +145,9 @@ PY
 case "${DATASET}" in
   cicids2017-friday-smoke|cicids2017)
     download_cicids_friday
+    ;;
+  cicids2017-all|cicids2017_full|cicids2017-full)
+    download_cicids_all
     ;;
   ustc|ustc_tfc2016)
     download_ustc
