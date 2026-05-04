@@ -113,6 +113,17 @@ def _unix_seconds(value: pd.Timestamp) -> float:
     return float(value.timestamp())
 
 
+def _parse_cicids_timestamps(values: pd.Series, csv_name: str) -> pd.Series:
+    timestamps = pd.to_datetime(values, errors="coerce", dayfirst=True)
+    if "afternoon" not in Path(csv_name).name.lower():
+        return timestamps
+
+    valid = timestamps.notna()
+    morning_like = valid & (timestamps.dt.hour < 12)
+    timestamps.loc[morning_like] = timestamps.loc[morning_like] + pd.Timedelta(hours=12)
+    return timestamps
+
+
 def _resolve_pcap(raw_dir: Path, pcap_name: str) -> Path:
     direct = raw_dir / "pcaps" / pcap_name
     if direct.exists():
@@ -143,7 +154,7 @@ def _extract_label_file(
     output_path = labels_dir / f"cicids2017_{job.slug}.csv"
     frame.to_csv(output_path, index=False)
 
-    timestamps = pd.to_datetime(frame[ts_col], errors="coerce")
+    timestamps = _parse_cicids_timestamps(frame[ts_col], csv_name)
     if job.attack_labels:
         attack_mask = frame[label_col].isin(job.attack_labels)
         selected_times = timestamps[attack_mask & timestamps.notna()]
