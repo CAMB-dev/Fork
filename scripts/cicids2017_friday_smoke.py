@@ -14,7 +14,12 @@ import pandas as pd
 
 from traffic_bert.config import write_json
 from traffic_bert.data.build import BuildConfig, build_processed_dataset
-from traffic_bert.data.split import assign_stratified_hash_split, processed_stats, stratified_sample
+from traffic_bert.data.split import (
+    assign_stratified_hash_split,
+    processed_stats,
+    split_run_stats,
+    stratified_sample,
+)
 from traffic_bert.data.validate import validation_summary
 from traffic_bert.data.schema import InputView
 
@@ -131,7 +136,18 @@ def _build_smoke_subset(
         group_column="flow_id",
         stratify_column="source_label",
     )
-    return _write_split_outputs(sampled, output_dir)
+    stats = _write_split_outputs(sampled, output_dir)
+    stats.update(
+        split_run_stats(
+            input_frame=frame,
+            output_frame=sampled,
+            split_method="random_flow_hash",
+            max_per_class=max_per_major,
+            seed=seed,
+        )
+    )
+    write_json(output_dir / "split.stats.json", stats)
+    return stats
 
 
 def _run_smoke_training(output_dir: Path, artifact_dir: Path) -> None:

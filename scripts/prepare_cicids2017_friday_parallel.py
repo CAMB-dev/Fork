@@ -25,6 +25,7 @@ from traffic_bert.data.schema import InputView
 from traffic_bert.data.split import (
     assign_stratified_hash_split,
     processed_stats,
+    split_run_stats,
     stratified_sample,
 )
 from traffic_bert.data.validate import validation_summary
@@ -205,12 +206,17 @@ def _merge_outputs(paths: list[Path], output_path: Path) -> dict:
     return stats
 
 
-def _write_split_outputs(frame: pd.DataFrame, output_dir: Path, max_per_major: int) -> dict:
+def _write_split_outputs(
+    frame: pd.DataFrame,
+    output_dir: Path,
+    max_per_major: int,
+    seed: int,
+) -> dict:
     sampled = stratified_sample(
         frame,
         stratify_column="major_label",
         max_per_class=max_per_major,
-        seed=42,
+        seed=seed,
     )
     sampled = assign_stratified_hash_split(
         sampled,
@@ -228,7 +234,13 @@ def _write_split_outputs(frame: pd.DataFrame, output_dir: Path, max_per_major: i
             output_dir / f"{split_name}.validate.json",
             validation_summary(split_frame),
         )
-    stats = processed_stats(sampled)
+    stats = split_run_stats(
+        input_frame=frame,
+        output_frame=sampled,
+        split_method="random_flow_hash",
+        max_per_class=max_per_major,
+        seed=seed,
+    )
     write_json(output_dir / "split.stats.json", stats)
     return stats
 
@@ -280,6 +292,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--padding-minutes", type=int, default=20)
     parser.add_argument("--max-per-major", type=int, default=50_000)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--no-time-window",
         action="store_true",
@@ -350,6 +363,7 @@ def main() -> None:
         pd.read_parquet(args.merged_path),
         args.split_dir,
         max_per_major=args.max_per_major,
+        seed=args.seed,
     )
     final = {
         "labels": label_summaries,

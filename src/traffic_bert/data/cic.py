@@ -116,6 +116,8 @@ class CicFlowLabelIndex:
         ]
         selected_columns = [column for column in selected_columns if column is not None]
         work = frame[selected_columns].dropna(subset=required_columns).copy()
+        work["label"] = work["label"].astype(str).str.strip()
+        work = work[work["label"] != ""]
         if "protocol" not in work:
             work["protocol"] = ""
         if "timestamp" in work:

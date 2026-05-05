@@ -75,7 +75,7 @@ def _source_label_for_flow(
             raise ValueError("label_source=cic_csv requires label_csv_path")
         src_ip, src_port = _parse_endpoint(flow_endpoint_a)
         dst_ip, dst_port = _parse_endpoint(flow_endpoint_b)
-        return cic_index.lookup(src_ip, dst_ip, src_port, dst_port, protocol)
+        return cic_index.lookup(src_ip, dst_ip, src_port, dst_port, protocol, timestamp=start_time)
     return infer_source_label(pcap_path, config.label_source, config.static_label)
 
 
@@ -145,12 +145,21 @@ def build_processed_dataset(config: BuildConfig) -> dict:
 
     rows: list[dict] = []
     raw_files = collect_pcap_files(config.input_path)
+    flow_counters = Counter(
+        {
+            "extracted_flows_total": 0,
+            "matched_flows": 0,
+            "unmatched_label_flows": 0,
+            "empty_payload_flows": 0,
+            "dropped_unmatched_label_flows": 0,
+            "dropped_empty_payload_flows": 0,
+        }
+    )
     for pcap_path in raw_files:
         flows = extractor.extract(pcap_path)
+        flow_counters["extracted_flows_total"] += len(flows)
 
         for flow in flows:
-            if not config.keep_empty_payload and not flow.has_payload:
-                continue
             source_label = _source_label_for_flow(
                 config=config,
                 pcap_path=pcap_path,
@@ -160,8 +169,20 @@ def build_processed_dataset(config: BuildConfig) -> dict:
                 start_time=flow.start_time,
                 cic_index=cic_index,
             )
-            if source_label is None and config.drop_unmatched_labels:
-                continue
+            if source_label is None:
+                flow_counters["unmatched_label_flows"] += 1
+                if config.drop_unmatched_labels:
+                    flow_counters["dropped_unmatched_label_flows"] += 1
+                    continue
+            else:
+                flow_counters["matched_flows"] += 1
+
+            if not flow.has_payload:
+                flow_counters["empty_payload_flows"] += 1
+                if not config.keep_empty_payload:
+                    flow_counters["dropped_empty_payload_flows"] += 1
+                    continue
+
             target = label_map.map_source_label(source_label)
             for view in config.views:
                 rows.append(
@@ -178,7 +199,7 @@ def build_processed_dataset(config: BuildConfig) -> dict:
     config.output_path.parent.mkdir(parents=True, exist_ok=True)
     frame = pd.DataFrame(rows)
     frame.to_parquet(config.output_path, index=False)
-    stats = dataset_stats(frame, raw_files)
+    stats = dataset_stats(frame, raw_files, flow_counters)
 
     stats_path = config.output_path.with_suffix(".stats.json")
     with open(stats_path, "w", encoding="utf-8") as handle:
@@ -186,7 +207,12 @@ def build_processed_dataset(config: BuildConfig) -> dict:
     return stats
 
 
-def dataset_stats(frame: pd.DataFrame, raw_files: list[Path]) -> dict:
+def dataset_stats(
+    frame: pd.DataFrame,
+    raw_files: list[Path],
+    flow_counters: Counter | dict | None = None,
+) -> dict:
+    counters = {str(key): int(value) for key, value in (flow_counters or {}).items()}
     if frame.empty:
         return {
             "raw_files": [str(path) for path in raw_files],
@@ -195,6 +221,7 @@ def dataset_stats(frame: pd.DataFrame, raw_files: list[Path]) -> dict:
             "views": {},
             "major_labels": {},
             "source_labels": {},
+            **counters,
         }
 
     return {
@@ -205,6 +232,7 @@ def dataset_stats(frame: pd.DataFrame, raw_files: list[Path]) -> dict:
         "major_labels": dict(Counter(frame["major_label"])),
         "source_labels": dict(Counter(frame["source_label"])),
         "empty_payload_rows": int((~frame["has_payload"]).sum()),
+        **counters,
         "packet_count": {
             "min": int(frame["packet_count"].min()),
             "median": float(frame["packet_count"].median()),

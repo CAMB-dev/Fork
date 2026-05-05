@@ -7,6 +7,8 @@ import hashlib
 
 import pandas as pd
 
+from traffic_bert.data.split_audit import minor_support_by_split, support_by_split
+
 
 def stable_bucket(value: str, modulo: int = 10_000) -> int:
     digest = hashlib.sha1(value.encode("utf-8")).hexdigest()
@@ -332,9 +334,12 @@ def _flatten_minor_labels(values: pd.Series) -> list[str]:
     return labels
 
 
-def processed_stats(frame: pd.DataFrame) -> dict:
+def processed_stats(frame: pd.DataFrame, metadata: dict | None = None) -> dict:
     if frame.empty:
-        return {"rows": 0, "flows": 0}
+        stats = {"rows": 0, "flows": 0}
+        if metadata:
+            stats.update(metadata)
+        return stats
     stats = {
         "rows": int(len(frame)),
         "flows": int(frame["flow_id"].nunique()),
@@ -347,6 +352,12 @@ def processed_stats(frame: pd.DataFrame) -> dict:
         "source_labels": dict(Counter(frame.get("source_label", []))),
         "source_datasets": dict(Counter(frame.get("source_dataset", []))),
     }
+    if "split" in frame:
+        stats["split_support"] = {
+            "major_labels": support_by_split(frame, "major_label"),
+            "source_labels": support_by_split(frame, "source_label"),
+            "minor_labels": minor_support_by_split(frame),
+        }
     for column in ["packet_count", "payload_byte_length", "packet_byte_length"]:
         if column in frame:
             stats[column] = {
@@ -354,4 +365,46 @@ def processed_stats(frame: pd.DataFrame) -> dict:
                 "median": float(frame[column].median()),
                 "max": int(frame[column].max()),
             }
+    if metadata:
+        stats.update(metadata)
     return stats
+
+
+def split_run_stats(
+    *,
+    input_frame: pd.DataFrame,
+    output_frame: pd.DataFrame,
+    split_method: str,
+    max_per_class: int,
+    stratify_column: str = "major_label",
+    split_stratify_column: str = "source_label",
+    group_column: str = "flow_id",
+    time_column: str | None = None,
+    block_size: int | None = None,
+    seed: int = 42,
+    train_ratio: float = 0.7,
+    val_ratio: float = 0.15,
+) -> dict:
+    metadata = {
+        "split_method": split_method,
+        "max_per_class": int(max_per_class),
+        "block_size": None if block_size is None else int(block_size),
+        "seed": int(seed),
+        "train_ratio": float(train_ratio),
+        "val_ratio": float(val_ratio),
+        "stratify_column": stratify_column,
+        "split_stratify_column": split_stratify_column,
+        "group_column": group_column,
+        "time_column": time_column,
+        "sampling": {
+            "input_rows": int(len(input_frame)),
+            "input_flows": int(input_frame["flow_id"].nunique())
+            if "flow_id" in input_frame
+            else int(len(input_frame)),
+            "output_rows": int(len(output_frame)),
+            "output_flows": int(output_frame["flow_id"].nunique())
+            if "flow_id" in output_frame
+            else int(len(output_frame)),
+        },
+    }
+    return processed_stats(output_frame, metadata=metadata)

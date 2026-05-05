@@ -82,6 +82,9 @@ class LabelMap:
     def map_source_label(self, source_label: str | None) -> LabelTarget:
         if not source_label:
             return self.fallback
+        source_label = str(source_label).strip()
+        if not source_label:
+            return self.fallback
         for rule in self.mappings:
             if rule.matches(source_label):
                 return LabelTarget(rule.major_label, rule.minor_labels)
@@ -113,4 +116,3 @@ class LabelMap:
             "minor_labels": self.minor_labels,
             "minor_labels_by_major": self.minor_labels_by_major,
         }
-

@@ -11,7 +11,7 @@ import pandas as pd
 from traffic_bert.config import write_json
 from traffic_bert.data.split import (
     assign_time_block_split,
-    processed_stats,
+    split_run_stats,
     stratified_sample,
 )
 from traffic_bert.data.validate import validation_summary
@@ -36,6 +36,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     frame = pd.read_parquet(args.input_path)
+    input_frame = frame
     if args.max_per_class > 0:
         frame = stratified_sample(
             frame,
@@ -66,7 +67,20 @@ def main() -> None:
             validation_summary(split_frame),
         )
 
-    stats = processed_stats(frame)
+    stats = split_run_stats(
+        input_frame=input_frame,
+        output_frame=frame,
+        split_method="time_block",
+        max_per_class=args.max_per_class,
+        stratify_column=args.stratify_column,
+        split_stratify_column=args.split_stratify_column,
+        group_column=args.group_column,
+        time_column=args.time_column,
+        block_size=args.block_size,
+        seed=args.seed,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+    )
     write_json(args.output_dir / "split.stats.json", stats)
     print(json.dumps(stats, ensure_ascii=False, indent=2))
 

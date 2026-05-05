@@ -31,6 +31,7 @@ from traffic_bert.data.split import (
     assign_file_time_split,
     assign_stratified_hash_split,
     processed_stats,
+    split_run_stats,
     stratified_sample,
 )
 from traffic_bert.data.validate import validation_summary
@@ -182,6 +183,7 @@ def sample_stratified_data(
     """Create a small stratified train/val/test subset from processed data."""
 
     frame = pd.read_parquet(input_path)
+    input_frame = frame
     sampled = stratified_sample(
         frame,
         stratify_column=stratify_column,
@@ -202,7 +204,18 @@ def sample_stratified_data(
         split_frame["major_label"].value_counts().rename_axis("major_label").reset_index(
             name="rows"
         ).to_csv(output_dir / f"{split_name}.class_distribution.csv", index=False)
-    stats = processed_stats(sampled)
+    stats = split_run_stats(
+        input_frame=input_frame,
+        output_frame=sampled,
+        split_method="random_flow_hash",
+        max_per_class=max_per_class,
+        stratify_column=stratify_column,
+        split_stratify_column=split_stratify_column,
+        group_column=group_column,
+        seed=seed,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+    )
     write_json(output_dir / "split.stats.json", stats)
     typer.echo(json.dumps(stats, ensure_ascii=False, indent=2))
 

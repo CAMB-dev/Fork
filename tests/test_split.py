@@ -6,6 +6,7 @@ from traffic_bert.data.split import (
     assign_time_block_split,
     assign_time_ordered_split,
     processed_stats,
+    split_run_stats,
     stratified_sample,
 )
 
@@ -47,6 +48,34 @@ def test_processed_stats_counts_expected_columns() -> None:
     assert stats["major_labels"]["benign"] == 1
     assert stats["minor_labels"]["ddos"] == 1
     assert stats["source_labels"]["BENIGN"] == 1
+    assert stats["split_support"]["major_labels"]["train"]["benign"] == 1
+
+
+def test_split_run_stats_records_sampling_and_method_metadata() -> None:
+    input_frame = pd.DataFrame(
+        {
+            "flow_id": ["a", "b", "c"],
+            "split": ["train", "val", "test"],
+            "major_label": ["benign", "benign", "dos_ddos"],
+            "source_label": ["BENIGN", "BENIGN", "DDoS"],
+            "minor_labels": [[], [], ["ddos"]],
+        }
+    )
+    output_frame = input_frame.iloc[:2].copy()
+
+    stats = split_run_stats(
+        input_frame=input_frame,
+        output_frame=output_frame,
+        split_method="time_block",
+        max_per_class=50_000,
+        block_size=128,
+    )
+
+    assert stats["split_method"] == "time_block"
+    assert stats["max_per_class"] == 50_000
+    assert stats["block_size"] == 128
+    assert stats["sampling"]["input_rows"] == 3
+    assert stats["sampling"]["output_rows"] == 2
 
 
 def test_assign_stratified_hash_split_keeps_groups_and_labels_present() -> None:

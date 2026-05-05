@@ -19,11 +19,18 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from traffic_bert.config import write_json
+from traffic_bert.data.cicids_audit import (
+    build_cicids_coverage_audit,
+    write_cicids_coverage_artifacts,
+)
 from traffic_bert.data.build import BuildConfig, build_processed_dataset
 from traffic_bert.data.schema import InputView
 from traffic_bert.data.split import (
+    assign_time_block_split,
+    assign_time_ordered_split,
     assign_stratified_hash_split,
     processed_stats,
+    split_run_stats,
     stratified_sample,
 )
 from traffic_bert.data.validate import validation_summary
@@ -232,29 +239,115 @@ def _merge_outputs(paths: list[Path], output_path: Path) -> dict:
     return stats
 
 
-def _write_split_outputs(frame: pd.DataFrame, output_dir: Path, max_per_major: int) -> dict:
+def _write_split_frame_outputs(frame: pd.DataFrame, output_dir: Path, stats: dict) -> dict:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for split_name in ["train", "val", "test"]:
+        split_frame = frame[frame["split"] == split_name]
+        split_frame.to_parquet(output_dir / f"{split_name}.parquet", index=False)
+        split_frame["major_label"].value_counts().rename_axis("major_label").reset_index(
+            name="rows"
+        ).to_csv(output_dir / f"{split_name}.class_distribution.csv", index=False)
+        write_json(output_dir / f"{split_name}.validate.json", validation_summary(split_frame))
+    write_json(output_dir / "split.stats.json", stats)
+    return stats
+
+
+def _write_random_split_outputs(
+    frame: pd.DataFrame,
+    output_dir: Path,
+    max_per_major: int,
+    seed: int,
+) -> dict:
     sampled = stratified_sample(
         frame,
         stratify_column="major_label",
         max_per_class=max_per_major,
-        seed=42,
+        seed=seed,
     )
     sampled = assign_stratified_hash_split(
         sampled,
         group_column="flow_id",
         stratify_column="source_label",
     )
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for split_name in ["train", "val", "test"]:
-        split_frame = sampled[sampled["split"] == split_name]
-        split_frame.to_parquet(output_dir / f"{split_name}.parquet", index=False)
-        split_frame["major_label"].value_counts().rename_axis("major_label").reset_index(
-            name="rows"
-        ).to_csv(output_dir / f"{split_name}.class_distribution.csv", index=False)
-        write_json(output_dir / f"{split_name}.validate.json", validation_summary(split_frame))
-    stats = processed_stats(sampled)
-    write_json(output_dir / "split.stats.json", stats)
-    return stats
+    stats = split_run_stats(
+        input_frame=frame,
+        output_frame=sampled,
+        split_method="random_flow_hash",
+        max_per_class=max_per_major,
+        seed=seed,
+    )
+    return _write_split_frame_outputs(sampled, output_dir, stats)
+
+
+def _write_time_ordered_split_outputs(
+    frame: pd.DataFrame,
+    output_dir: Path,
+    max_per_major: int,
+    seed: int,
+) -> dict:
+    sampled = stratified_sample(
+        frame,
+        stratify_column="major_label",
+        max_per_class=max_per_major,
+        seed=seed,
+    )
+    sampled = assign_time_ordered_split(
+        sampled,
+        group_column="flow_id",
+        stratify_column="source_label",
+        time_column="start_time",
+    )
+    stats = split_run_stats(
+        input_frame=frame,
+        output_frame=sampled,
+        split_method="time_ordered",
+        max_per_class=max_per_major,
+        time_column="start_time",
+        seed=seed,
+    )
+    return _write_split_frame_outputs(sampled, output_dir, stats)
+
+
+def _write_time_block_split_outputs(
+    frame: pd.DataFrame,
+    output_dir: Path,
+    max_per_major: int,
+    block_size: int,
+    seed: int,
+) -> dict:
+    sampled = stratified_sample(
+        frame,
+        stratify_column="major_label",
+        max_per_class=max_per_major,
+        seed=seed,
+    )
+    sampled = assign_time_block_split(
+        sampled,
+        group_column="flow_id",
+        stratify_column="source_label",
+        time_column="start_time",
+        block_size=block_size,
+        seed=seed,
+    )
+    stats = split_run_stats(
+        input_frame=frame,
+        output_frame=sampled,
+        split_method="time_block",
+        max_per_class=max_per_major,
+        time_column="start_time",
+        block_size=block_size,
+        seed=seed,
+    )
+    return _write_split_frame_outputs(sampled, output_dir, stats)
+
+
+def _has_low_support(stats: dict, low_support_min: int) -> bool:
+    support = stats.get("split_support", {}).get("major_labels", {})
+    for label in ["infiltration", "web_attack", "botnet_malware"]:
+        for split_name in ["val", "test"]:
+            if int(support.get(split_name, {}).get(label, 0)) < low_support_min:
+                return True
+    return False
 
 
 def parse_args() -> argparse.Namespace:
@@ -280,12 +373,35 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/processed/cicids2017/all_split_label_stratified"),
     )
+    parser.add_argument(
+        "--time-ordered-split-dir",
+        type=Path,
+        default=Path("data/processed/cicids2017/all_split_time_ordered"),
+    )
+    parser.add_argument(
+        "--time-block-split-dir",
+        type=Path,
+        default=Path("data/processed/cicids2017/all_split_time_block"),
+    )
+    parser.add_argument(
+        "--time-block-small-split-dir",
+        type=Path,
+        default=Path("data/processed/cicids2017/all_split_time_block_128"),
+    )
+    parser.add_argument(
+        "--audit-dir",
+        type=Path,
+        default=Path("artifacts/cicids2017_coverage"),
+    )
     parser.add_argument("--label-map", type=Path, default=Path("configs/label_map.yaml"))
     parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument("--max-packets-per-flow", type=int, default=16)
     parser.add_argument("--max-packets-to-read", type=int, default=None)
     parser.add_argument("--padding-minutes", type=int, default=20)
     parser.add_argument("--max-per-major", type=int, default=50_000)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--time-block-size", type=int, default=512)
+    parser.add_argument("--low-support-min", type=int, default=2)
     parser.add_argument("--no-time-window", action="store_true")
     parser.add_argument("--force", action="store_true")
     return parser.parse_args()
@@ -305,6 +421,13 @@ def main() -> None:
         )
         for job in JOBS
     ]
+    coverage = build_cicids_coverage_audit(
+        raw_dir=args.raw_dir,
+        label_zip=args.label_zip,
+        label_map_path=args.label_map,
+        processed_dir=args.output_dir,
+    )
+    write_cicids_coverage_artifacts(coverage, args.audit_dir)
 
     payloads = []
     for job, summary in zip(JOBS, summaries, strict=True):
@@ -335,22 +458,63 @@ def main() -> None:
                 print(json.dumps(result, ensure_ascii=False, indent=2))
                 built.append(result)
 
+    coverage = build_cicids_coverage_audit(
+        raw_dir=args.raw_dir,
+        label_zip=args.label_zip,
+        label_map_path=args.label_map,
+        processed_dir=args.output_dir,
+    )
+    write_cicids_coverage_artifacts(coverage, args.audit_dir)
+
     shard_paths = [args.output_dir / f"flows_{job.slug}.parquet" for job in JOBS]
     merged_stats = _merge_outputs(shard_paths, args.merged_path)
-    split_stats = _write_split_outputs(
-        pd.read_parquet(args.merged_path),
+    merged_frame = pd.read_parquet(args.merged_path)
+    split_stats = _write_random_split_outputs(
+        merged_frame,
         args.split_dir,
         args.max_per_major,
+        args.seed,
     )
+    time_ordered_stats = _write_time_ordered_split_outputs(
+        merged_frame,
+        args.time_ordered_split_dir,
+        args.max_per_major,
+        args.seed,
+    )
+    time_block_stats = _write_time_block_split_outputs(
+        merged_frame,
+        args.time_block_split_dir,
+        args.max_per_major,
+        args.time_block_size,
+        args.seed,
+    )
+    time_block_small_stats = None
+    if _has_low_support(time_block_stats, args.low_support_min):
+        time_block_small_stats = _write_time_block_split_outputs(
+            merged_frame,
+            args.time_block_small_split_dir,
+            args.max_per_major,
+            128,
+            args.seed,
+        )
     print(
         json.dumps(
             {
                 "labels": summaries,
+                "coverage_audit_dir": str(args.audit_dir),
                 "built": built,
                 "merged_path": str(args.merged_path),
                 "merged_stats": merged_stats,
                 "split_dir": str(args.split_dir),
                 "split_stats": split_stats,
+                "time_ordered_split_dir": str(args.time_ordered_split_dir),
+                "time_ordered_stats": time_ordered_stats,
+                "time_block_split_dir": str(args.time_block_split_dir),
+                "time_block_stats": time_block_stats,
+                "time_block_small_split_dir": str(args.time_block_small_split_dir)
+                if time_block_small_stats is not None
+                else None,
+                "time_block_small_stats": time_block_small_stats,
             },
             ensure_ascii=False,
             indent=2,
