@@ -6,7 +6,9 @@ MAX_WORKERS="${MAX_WORKERS:-3}"
 MAX_PACKETS_PER_FLOW="${MAX_PACKETS_PER_FLOW:-16}"
 MAX_PACKETS_TO_READ="${MAX_PACKETS_TO_READ:-}"
 PADDING_MINUTES="${PADDING_MINUTES:-20}"
+CSV_TIME_OFFSET_HOURS="${CSV_TIME_OFFSET_HOURS:-4}"
 MAX_PER_MAJOR="${MAX_PER_MAJOR:-50000}"
+MIN_ATTACK_FLOWS_PER_LABEL="${MIN_ATTACK_FLOWS_PER_LABEL:-1}"
 NO_TIME_WINDOW="${NO_TIME_WINDOW:-0}"
 FORCE="${FORCE:-0}"
 UV_BIN="${UV_BIN:-uv}"
@@ -18,7 +20,9 @@ args=(
   --max-workers "${MAX_WORKERS}"
   --max-packets-per-flow "${MAX_PACKETS_PER_FLOW}"
   --padding-minutes "${PADDING_MINUTES}"
+  --csv-time-offset-hours "${CSV_TIME_OFFSET_HOURS}"
   --max-per-major "${MAX_PER_MAJOR}"
+  --min-attack-flows-per-label "${MIN_ATTACK_FLOWS_PER_LABEL}"
 )
 
 if [[ -n "${MAX_PACKETS_TO_READ}" ]]; then

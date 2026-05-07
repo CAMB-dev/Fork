@@ -150,6 +150,7 @@ def _extract_label_file(
     label_zip: Path,
     job: CicidsJob,
     padding_minutes: int,
+    csv_time_offset_hours: float,
 ) -> dict:
     csv_name = _find_csv_name(label_zip, job.csv_contains)
     frame = _read_label_csv(label_zip, csv_name)
@@ -157,6 +158,10 @@ def _extract_label_file(
     ts_col = _column(frame, "timestamp")
 
     timestamps = _parse_cicids_timestamps(frame[ts_col], csv_name)
+    original_min_time = timestamps.dropna().min()
+    original_max_time = timestamps.dropna().max()
+    if csv_time_offset_hours:
+        timestamps = timestamps + pd.Timedelta(hours=csv_time_offset_hours)
     frame[ts_col] = timestamps.dt.strftime("%Y-%m-%d %H:%M:%S")
     labels_dir = raw_dir / "labels"
     labels_dir.mkdir(parents=True, exist_ok=True)
@@ -183,6 +188,9 @@ def _extract_label_file(
         "rows": int(len(frame)),
         "label_counts": frame[label_col].value_counts().to_dict(),
         "attack_labels": list(job.attack_labels),
+        "csv_time_offset_hours": csv_time_offset_hours,
+        "original_timestamp_start": None if pd.isna(original_min_time) else str(original_min_time),
+        "original_timestamp_end": None if pd.isna(original_max_time) else str(original_max_time),
         "window_start": None if pd.isna(min_time) else str(min_time),
         "window_end": None if pd.isna(max_time) else str(max_time),
         "window_start_unix": None if pd.isna(min_time) else _unix_seconds(min_time),
@@ -350,6 +358,44 @@ def _has_low_support(stats: dict, low_support_min: int) -> bool:
     return False
 
 
+def _validate_attack_coverage(
+    summaries: list[dict],
+    shard_paths: list[Path],
+    min_attack_flows_per_label: int,
+) -> None:
+    failures = []
+    for summary, shard_path in zip(summaries, shard_paths, strict=True):
+        attack_labels = summary.get("attack_labels", [])
+        if not attack_labels:
+            continue
+        if not shard_path.exists():
+            failures.append(
+                f"{summary['slug']}: missing processed shard {shard_path}"
+            )
+            continue
+        if "source_label" not in pq.read_schema(shard_path).names:
+            counts = {}
+        else:
+            frame = pd.read_parquet(shard_path, columns=["source_label"])
+            counts = frame["source_label"].value_counts().to_dict()
+        for label in attack_labels:
+            count = int(counts.get(label, 0))
+            if count < min_attack_flows_per_label:
+                failures.append(
+                    f"{summary['slug']} / {label}: {count} processed flows "
+                    f"< {min_attack_flows_per_label}"
+                )
+    if failures:
+        joined = "\n  - ".join(failures)
+        raise RuntimeError(
+            "CICIDS2017 attack coverage check failed. Refusing to write training "
+            "splits from broken coverage:\n  - "
+            f"{joined}\n"
+            "Check PCAP/CSV timestamp alignment, or rerun with an explicit "
+            "--csv-time-offset-hours value."
+        )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw-dir", type=Path, default=Path("data/raw/CICIDS2017"))
@@ -398,7 +444,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-packets-per-flow", type=int, default=16)
     parser.add_argument("--max-packets-to-read", type=int, default=None)
     parser.add_argument("--padding-minutes", type=int, default=20)
+    parser.add_argument(
+        "--csv-time-offset-hours",
+        type=float,
+        default=4.0,
+        help="Hours added to official CSV timestamps to align local CICIDS time with PCAP UTC.",
+    )
     parser.add_argument("--max-per-major", type=int, default=50_000)
+    parser.add_argument("--min-attack-flows-per-label", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--time-block-size", type=int, default=512)
     parser.add_argument("--low-support-min", type=int, default=2)
@@ -418,6 +471,7 @@ def main() -> None:
             label_zip=args.label_zip,
             job=job,
             padding_minutes=args.padding_minutes,
+            csv_time_offset_hours=args.csv_time_offset_hours,
         )
         for job in JOBS
     ]
@@ -467,6 +521,11 @@ def main() -> None:
     write_cicids_coverage_artifacts(coverage, args.audit_dir)
 
     shard_paths = [args.output_dir / f"flows_{job.slug}.parquet" for job in JOBS]
+    _validate_attack_coverage(
+        summaries,
+        shard_paths,
+        min_attack_flows_per_label=args.min_attack_flows_per_label,
+    )
     merged_stats = _merge_outputs(shard_paths, args.merged_path)
     merged_frame = pd.read_parquet(args.merged_path)
     split_stats = _write_random_split_outputs(
