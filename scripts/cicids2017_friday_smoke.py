@@ -114,6 +114,8 @@ def _write_split_outputs(frame: pd.DataFrame, output_dir: Path) -> dict:
             validation_summary(split_frame),
         )
     stats = processed_stats(frame)
+    stats["formal_eligible"] = False
+    stats["formal_eligibility_reason"] = "Friday smoke subsets are for pipeline validation only."
     write_json(output_dir / "split.stats.json", stats)
     return stats
 

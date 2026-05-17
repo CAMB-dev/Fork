@@ -143,21 +143,21 @@ PY
 }
 
 case "${DATASET}" in
-  cicids2017-friday-smoke|cicids2017)
+  cicids2017-friday-smoke)
     download_cicids_friday
     ;;
-  cicids2017-all|cicids2017_full|cicids2017-full)
+  cicids2017|cicids2017-all|cicids2017_full|cicids2017-full)
     download_cicids_all
     ;;
   ustc|ustc_tfc2016)
     download_ustc
     ;;
   all)
-    download_cicids_friday
+    download_cicids_all
     download_ustc
     ;;
   *)
-    echo "Unsupported DATASET=${DATASET}. Use cicids2017-friday-smoke, cicids2017, ustc_tfc2016, ustc, or all." >&2
+    echo "Unsupported DATASET=${DATASET}. Use cicids2017-friday-smoke, cicids2017, cicids2017-all, ustc_tfc2016, ustc, or all." >&2
     exit 1
     ;;
 esac

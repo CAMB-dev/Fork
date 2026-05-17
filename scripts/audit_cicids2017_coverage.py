@@ -24,12 +24,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--processed-dir",
         type=Path,
-        default=Path("data/processed/cicids2017/all_payload_only"),
+        default=Path("data/processed/cicids2017/all_masked_header_packet_cap32_notcpclose"),
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("artifacts/cicids2017_coverage"),
+        default=Path("artifacts/cicids2017_coverage_masked_header_cap32_notcpclose"),
     )
     return parser.parse_args()
 

@@ -45,11 +45,27 @@ class ByteBertForHierarchicalClassification(nn.Module):
         minor_to_major: list[int] | None = None,
         lambda_minor: float = 1.0,
         pooling: str = "mean",
+        major_class_weights: list[float] | None = None,
+        context_feature_size: int = 0,
+        context_hidden_size: int | None = None,
     ) -> None:
         super().__init__()
         self.bert = BertModel(bert_config)
-        self.major_classifier = nn.Linear(bert_config.hidden_size, num_major_labels)
-        self.minor_classifier = nn.Linear(bert_config.hidden_size, num_minor_labels)
+        self.context_feature_size = int(context_feature_size)
+        if context_hidden_size is None:
+            context_hidden_size = bert_config.hidden_size
+        self.context_projection: nn.Module | None = None
+        classifier_input_size = bert_config.hidden_size
+        if self.context_feature_size > 0:
+            self.context_projection = nn.Sequential(
+                nn.LayerNorm(self.context_feature_size),
+                nn.Linear(self.context_feature_size, int(context_hidden_size)),
+                nn.GELU(),
+                nn.Dropout(float(bert_config.hidden_dropout_prob)),
+            )
+            classifier_input_size += int(context_hidden_size)
+        self.major_classifier = nn.Linear(classifier_input_size, num_major_labels)
+        self.minor_classifier = nn.Linear(classifier_input_size, num_minor_labels)
         self.lambda_minor = lambda_minor
         self.pooling = pooling
         if minor_to_major is None:
@@ -57,6 +73,13 @@ class ByteBertForHierarchicalClassification(nn.Module):
         self.register_buffer(
             "minor_to_major",
             torch.tensor(minor_to_major, dtype=torch.long),
+            persistent=False,
+        )
+        if major_class_weights is None:
+            major_class_weights = []
+        self.register_buffer(
+            "major_class_weights",
+            torch.tensor(major_class_weights, dtype=torch.float32),
             persistent=False,
         )
 
@@ -98,22 +121,42 @@ class ByteBertForHierarchicalClassification(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         window_mask: torch.Tensor | None = None,
+        context_features: torch.Tensor | None = None,
         major_labels: torch.Tensor | None = None,
         minor_labels: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         flow_repr = self._encode_windows(input_ids, attention_mask, window_mask)
-        major_logits = self.major_classifier(flow_repr)
-        minor_logits = self.minor_classifier(flow_repr)
+        classifier_repr = flow_repr
+        if self.context_projection is not None:
+            if context_features is None:
+                context_features = torch.zeros(
+                    flow_repr.shape[0],
+                    self.context_feature_size,
+                    dtype=flow_repr.dtype,
+                    device=flow_repr.device,
+                )
+            else:
+                context_features = context_features.to(dtype=flow_repr.dtype, device=flow_repr.device)
+            context_repr = self.context_projection(context_features)
+            classifier_repr = torch.cat([flow_repr, context_repr], dim=-1)
+        major_logits = self.major_classifier(classifier_repr)
+        minor_logits = self.minor_classifier(classifier_repr)
 
         result = {
             "flow_repr": flow_repr,
+            "classifier_repr": classifier_repr,
             "major_logits": major_logits,
             "minor_logits": minor_logits,
         }
 
         losses: list[torch.Tensor] = []
         if major_labels is not None:
-            major_loss = F.cross_entropy(major_logits, major_labels)
+            major_weight = (
+                self.major_class_weights.to(device=major_logits.device)
+                if self.major_class_weights.numel() == major_logits.shape[-1]
+                else None
+            )
+            major_loss = F.cross_entropy(major_logits, major_labels, weight=major_weight)
             result["major_loss"] = major_loss
             losses.append(major_loss)
 
@@ -136,4 +179,3 @@ class ByteBertForHierarchicalClassification(nn.Module):
         if losses:
             result["loss"] = sum(losses)
         return result
-

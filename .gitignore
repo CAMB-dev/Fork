@@ -4,6 +4,10 @@ __pycache__/
 *.pyo
 *.pyd
 .pytest_cache/
+pytest_tmp_*/
+.codex_ssh_askpass.*
+.codex_cloud_ed25519*
+.tmp_pip/
 .ruff_cache/
 .mypy_cache/
 .coverage
@@ -47,4 +51,3 @@ wandb/
 Thumbs.db
 .idea/
 .vscode/
-

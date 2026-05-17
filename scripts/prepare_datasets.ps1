@@ -1,7 +1,7 @@
 param(
     [string]$Workspace = ".",
-    [ValidateSet("cicids2017-friday-smoke", "ustc_tfc2016", "ustc", "all")]
-    [string]$Dataset = "cicids2017-friday-smoke",
+    [ValidateSet("cicids2017-friday-smoke", "cicids2017", "cicids2017-all", "ustc_tfc2016", "ustc", "all")]
+    [string]$Dataset = "cicids2017",
     [string]$Proxy = "",
     [string]$HfEndpoint = "https://hf-mirror.com",
     [switch]$SkipDownload,
@@ -9,187 +9,61 @@ param(
     [switch]$RunSmokeTrain,
     [switch]$SkipValidate,
     [switch]$SkipAudit,
-    [int]$MaxPacketsToRead = 250000,
+    [int]$MaxWorkers = 5,
+    [int]$UstcWorkers = 4,
+    [int]$MaxPacketsToRead = 0,
     [int]$MaxPacketsToSkip = 0,
-    [int]$MaxPacketsPerFlow = 16,
-    [int]$MaxPerMajor = 2000,
-    [string]$LabelFileContains = "",
-    [string]$StartTime = "",
-    [string]$EndTime = "",
-    [string]$UstcSourceRoot = "data\raw\USTC-TFC2016\extracted\USTC-TFC2016-master",
-    [string]$UstcMergedPath = "data\processed\ustc_tfc2016\merged\payload_only.parquet",
-    [string]$UstcLabelSplitDir = "data\processed\ustc_tfc2016\split_label_stratified",
-    [string]$UstcSourceSplitDir = "data\processed\ustc_tfc2016\split_source_file"
+    [int]$MaxPacketsPerFlow = 32,
+    [int]$FlowTimeoutSeconds = 120,
+    [bool]$CloseOnTcpFlags = $false,
+    [string]$CicidsViews = "masked_header_packet",
+    [string]$UstcSourceRoot = "data\raw\USTC-TFC2016\extracted\USTC-TFC2016-master"
 )
 
 $ErrorActionPreference = "Stop"
+Set-Location -LiteralPath $Workspace
 
-function Invoke-Step {
-    param(
-        [string]$Name,
-        [scriptblock]$Command
-    )
-    Write-Host ""
-    Write-Host "==== $Name ====" -ForegroundColor Cyan
-    & $Command
+if ($Proxy) {
+    $env:HTTP_PROXY = $Proxy
+    $env:HTTPS_PROXY = $Proxy
+}
+$env:HF_ENDPOINT = $HfEndpoint
+
+if (Get-Command uv -ErrorAction SilentlyContinue) {
+    $python = @("uv", "run", "python")
+} elseif (Test-Path ".venv\Scripts\python.exe") {
+    $python = @(".venv\Scripts\python.exe")
+} elseif (Test-Path ".venv/bin/python") {
+    $python = @(".venv/bin/python")
+} else {
+    throw "Could not find uv or project .venv Python."
 }
 
-function Test-CommandExists {
-    param([string]$Name)
-    return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue)
+$argsList = @(
+    "scripts/prepare_data.py",
+    "--dataset", $Dataset,
+    "--max-workers", "$MaxWorkers",
+    "--ustc-workers", "$UstcWorkers",
+    "--max-packets-to-skip", "$MaxPacketsToSkip",
+    "--max-packets-per-flow", "$MaxPacketsPerFlow",
+    "--flow-timeout-seconds", "$FlowTimeoutSeconds",
+    $(if ($CloseOnTcpFlags) { "--close-on-tcp-flags" } else { "--no-close-on-tcp-flags" }),
+    "--cicids-views", $CicidsViews,
+    "--ustc-source-root", $UstcSourceRoot
+)
+
+if ($MaxPacketsToRead -gt 0) {
+    $argsList += @("--max-packets-to-read", "$MaxPacketsToRead")
 }
+if ($SkipDownload) { $argsList += "--skip-download" }
+if ($ForceBuild) { $argsList += "--force" }
+if ($RunSmokeTrain) { $argsList += "--run-smoke-train" }
+if ($SkipValidate) { $argsList += "--skip-validate" }
+if ($SkipAudit) { $argsList += "--skip-audit" }
 
-function Invoke-ValidateSplit {
-    param([string]$SplitDir)
-    foreach ($split in @("train", "val", "test")) {
-        $path = Join-Path $SplitDir "$split.parquet"
-        if (Test-Path -LiteralPath $path) {
-            Invoke-Step "Validate $path" {
-                uv run traffic-bert data validate --input-path $path
-            }
-        }
-    }
+$pythonArgs = @()
+if ($python.Length -gt 1) {
+    $pythonArgs += $python[1..($python.Length - 1)]
 }
-
-function Invoke-AuditSplit {
-    param(
-        [string]$SplitDir,
-        [string]$OutputPath
-    )
-    $train = Join-Path $SplitDir "train.parquet"
-    $val = Join-Path $SplitDir "val.parquet"
-    $test = Join-Path $SplitDir "test.parquet"
-    if ((Test-Path -LiteralPath $train) -and (Test-Path -LiteralPath $val) -and (Test-Path -LiteralPath $test)) {
-        Invoke-Step "Audit $SplitDir" {
-            uv run python scripts/audit_processed_split.py `
-                --train-path $train `
-                --val-path $val `
-                --test-path $test `
-                --output-path $OutputPath
-        }
-    }
-}
-
-function Invoke-CicidsFridaySmoke {
-    $argsList = @(
-        "run",
-        "python",
-        "scripts/cicids2017_friday_smoke.py",
-        "--max-packets-to-read",
-        "$MaxPacketsToRead",
-        "--max-packets-to-skip",
-        "$MaxPacketsToSkip",
-        "--max-packets-per-flow",
-        "$MaxPacketsPerFlow",
-        "--max-per-major",
-        "$MaxPerMajor"
-    )
-    if ($StartTime) {
-        $argsList += @("--start-time", $StartTime)
-    }
-    if ($EndTime) {
-        $argsList += @("--end-time", $EndTime)
-    }
-    if ($LabelFileContains) {
-        $argsList += @("--label-file-contains", $LabelFileContains)
-    }
-    if ($SkipDownload) {
-        $argsList += "--skip-download"
-    }
-    if ($ForceBuild) {
-        $argsList += "--force-build"
-    }
-    if ($RunSmokeTrain) {
-        $argsList += "--run-train"
-    }
-    Invoke-Step "Prepare CICIDS2017 Friday smoke" {
-        & uv @argsList
-    }
-
-    if (-not $SkipValidate) {
-        Invoke-ValidateSplit "data\processed\cicids2017\smoke"
-    }
-    if (-not $SkipAudit) {
-        Invoke-AuditSplit "data\processed\cicids2017\smoke" "artifacts\cicids2017_smoke\split_audit.json"
-    }
-}
-
-function Invoke-UstcPipeline {
-    if (-not (Test-Path -LiteralPath $UstcSourceRoot)) {
-        Write-Warning "USTC source root not found: $UstcSourceRoot"
-        Write-Warning "Place/extract USTC-TFC2016 under that path or pass -UstcSourceRoot. Skipping USTC."
-        return
-    }
-
-    Invoke-Step "Preprocess USTC-TFC2016 PCAP files" {
-        powershell -NoProfile -ExecutionPolicy Bypass -File scripts/preprocess_ustc_tfc2016.ps1 `
-            -Workspace . `
-            -SourceRoot $UstcSourceRoot `
-            -MaxPacketsPerFlow $MaxPacketsPerFlow
-    }
-
-    $files = Get-ChildItem -Path "data\processed\ustc_tfc2016\files" -Filter *.parquet -ErrorAction SilentlyContinue
-    if (-not $files) {
-        throw "No USTC processed parquet files found under data\processed\ustc_tfc2016\files"
-    }
-
-    New-Item -ItemType Directory -Force -Path (Split-Path $UstcMergedPath -Parent) | Out-Null
-    $mergeArgs = @("run", "traffic-bert", "data", "merge")
-    foreach ($file in $files) {
-        $mergeArgs += @("--input-path", $file.FullName)
-    }
-    $mergeArgs += @("--output-path", $UstcMergedPath)
-    Invoke-Step "Merge USTC processed files" {
-        & uv @mergeArgs
-    }
-
-    Invoke-Step "Create USTC label-stratified split" {
-        uv run traffic-bert data sample-stratified `
-            --input-path $UstcMergedPath `
-            --output-dir $UstcLabelSplitDir `
-            --stratify-column major_label `
-            --split-stratify-column source_label `
-            --group-column flow_id `
-            --max-per-class 1000000000
-    }
-
-    Invoke-Step "Create USTC source-file split" {
-        uv run traffic-bert data split `
-            --input-path $UstcMergedPath `
-            --output-dir $UstcSourceSplitDir `
-            --group-column source_file
-    }
-
-    if (-not $SkipValidate) {
-        Invoke-ValidateSplit $UstcLabelSplitDir
-        Invoke-ValidateSplit $UstcSourceSplitDir
-    }
-    if (-not $SkipAudit) {
-        Invoke-AuditSplit $UstcLabelSplitDir "artifacts\ustc_tfc2016\split_label_stratified_audit.json"
-        Invoke-AuditSplit $UstcSourceSplitDir "artifacts\ustc_tfc2016\split_source_file_audit.json"
-    }
-}
-
-Push-Location $Workspace
-try {
-    if (-not (Test-CommandExists "uv")) {
-        throw "uv is required but was not found in PATH"
-    }
-    if ($Proxy) {
-        $env:HTTP_PROXY = $Proxy
-        $env:HTTPS_PROXY = $Proxy
-    }
-    if ($HfEndpoint) {
-        $env:HF_ENDPOINT = $HfEndpoint
-    }
-
-    if ($Dataset -in @("cicids2017-friday-smoke", "all")) {
-        Invoke-CicidsFridaySmoke
-    }
-    if ($Dataset -in @("ustc_tfc2016", "ustc", "all")) {
-        Invoke-UstcPipeline
-    }
-}
-finally {
-    Pop-Location
-}
+$pythonArgs += $argsList
+& $python[0] @pythonArgs

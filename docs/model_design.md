@@ -1,12 +1,12 @@
 # 模型设计
 
-本项目模型主线是 Byte-BERT：使用 BERT 架构，但输入不是自然语言句子，而是由网络流量字节序列文本化得到的 token 序列。
+本文档描述当前模型路线。Byte-BERT 是方案1 baseline；SCE 是后续方案2 的核心创新模块。
 
-## 1. 总体结构
+## 1. 当前 baseline 结构
 
 ```text
-flow bytes
-  -> byte textual tokenizer
+flow bytes / masked packet bytes
+  -> byte tokenizer
   -> sliding windows
   -> Byte-BERT encoder
   -> window pooling
@@ -14,13 +14,16 @@ flow bytes
   -> hierarchical classifier
 ```
 
-## 2. 字节文本化 tokenizer
+该 baseline 的作用是建立可信工程链路：PCAP 解析、flow 重组、token 化、训练、评估、推理和展示系统后端。
 
-每个 byte 映射为固定 token：
+## 2. Byte tokenizer
+
+方案1 使用固定 byte token：
 
 ```text
-0x48 0x45 0x4c 0x4c 0x4f
--> b_48 b_45 b_4c b_4c b_4f
+0x00 -> b_00
+...
+0xff -> b_ff
 ```
 
 特殊 token：
@@ -30,20 +33,73 @@ flow bytes
 [PKT_FWD] [PKT_BWD] [PKT_END]
 ```
 
-词表规模约为：
+该 tokenizer 可逆、稳定、便于快速训练，但它仍然直接暴露原始 byte 模式。它不是最终 SCE，只是 baseline 和 SCE 的输入基座。
 
-```text
-256 byte tokens + 8 special tokens = 264
+## 3. SCE 定义
+
+SCE 全称 Semantic Conversion Encoder，即语义转换编码器。它是本项目定义的核心模块，不是现成库或固定论文名词。
+
+SCE 的目标是将以下原始信号转换成更稳定、更可学习的语义 token：
+
+- payload bytes。
+- header fields。
+- packet direction。
+- packet length pattern。
+- flow-level interaction pattern。
+
+理想效果是让模型少记偶然 byte、IP/端口或数据集特征，多学习类似 `HTTP_POST_FORM`、`CREDENTIAL_SUBMISSION`、`SHORT_RESET_SEQUENCE` 这样的行为模式。SCE 后续可以用离散 codebook、聚类、可学习 tokenizer 或规则引导的语义片段实现。
+
+## 4. SCE v0：频率 codebook 骨架
+
+当前已加入一个最小 SCE/codebook 骨架：
+
+```bash
+traffic-bert sce build-codebook \
+  --input-path data/processed/cicids2017/all_masked_header_split_submode_stratified_group_cap32_notcpclose/train.parquet \
+  --output-path artifacts/sce/cicids_v0_frequency_codebook_sample.json \
+  --view masked_header_packet \
+  --chunk-size 4 \
+  --max-entries 64 \
+  --min-count 5 \
+  --max-rows 20000
 ```
 
-这个 tokenizer 不依赖中文或英文预训练词表，因为 payload 的语义单位不是自然语言词，而是协议字段、命令片段、二进制结构和攻击 payload 模式。
+实现范围：
 
-## 3. Byte-BERT Encoder
+- `src/traffic_bert/sce.py` 提供 `SemanticCodebook`、`learn_frequency_codebook` 和 label-lift codebook。
+- codebook 将 byte chunk 转成 `[SCE_0000]` 形式的离散 token。
+- `traffic-bert sce build-codebook` 支持 `frequency` 和 `label_lift` ranking；label-lift 可用 `--max-rows-per-label` 做确定性 reservoir 抽样，避免按 parquet head 抽样误导 Bot token。
+- unmatched chunk 会 fallback 为原始 byte token，避免丢失信息。
+- 默认跳过全零 chunk，避免 masked-header 的零填充主导 codebook。
+- `ByteTokenizer(extra_tokens=codebook.tokens)` 可承载 SCE token，但默认 tokenizer 不改变。
+- `FlowWindowDataset(..., semantic_codebook=...)` 可在样本编码时使用 SCE token。
+- `traffic-bert train/eval classifier`、`eval calibrate-thresholds`、`predict hex/pcap` 已支持 `--semantic-codebook-path`。
+- checkpoint 会保存 codebook 元数据，评估和预测可从 checkpoint 自动恢复 codebook。
 
-第一版采用小型 BERT 配置：
+当前限制：
+
+- v0 只是确定性频率 codebook，不是最终语义聚类或可学习 tokenizer。
+- v14 对照显示朴素频率 codebook 会让 Bot false positive 变多，不能作为最终 SCE 方案。
+- v15 label-lift Bot codebook 也未超过当前 Byte-BERT baseline，说明简单监督 byte chunk 仍不足以稳定提升 Bot 这类短连接形态。
+- 在 masked-header 视图中仍会学到部分 header/protocol 片段，后续需要进一步过滤低信息 token 或引入更有语义的 chunk 特征。
+
+## 5. SCE 分阶段原则
+
+当前不把已有 byte tokenizer 硬包装成 SCE。文档和论文中应明确：
+
+- 方案1：Byte-BERT baseline，证明 PCAP-first 链路成立。
+- 方案2：SCE/codebook，作为核心创新实现。
+- 方案3：SCE/Byte-BERT 自监督预训练和跨数据集泛化。
+
+这样可以避免在 baseline 尚未稳定时过早引入复杂模块，也避免论文创新点被写成简单 byte token 化。
+
+## 6. Byte-BERT Encoder
+
+当前 baseline 使用小型 BERT 配置：
 
 ```text
-vocab_size = 264
+base vocab_size = 318
+SCE vocab_size = 318 + codebook entries
 max_position_embeddings = 512
 hidden_size = 256
 num_hidden_layers = 4
@@ -51,173 +107,62 @@ num_attention_heads = 4
 intermediate_size = 1024
 ```
 
-选择小模型的原因：
+当前训练以云端 CUDA 为主，本地只做轻量验证。模型规模后续可扩大，但必须先保证数据 gate、split audit 和 per-class 结果可信。
 
-- 本机 GPU 为 RTX 3050 Laptop，显存约 4GB。
-- flow 级输入需要滑窗，batch 内可能包含多个窗口。
-- 第一阶段优先保证训练可跑通，再逐步扩大模型。
+## 7. 长 flow 处理
 
-## 4. MLM 预训练
-
-预训练任务使用 masked language modeling。
-
-输入 token 随机 mask：
-
-- 15% token 参与 MLM。
-- 其中 80% 替换为 `[MASK]`。
-- 10% 替换为随机 byte token。
-- 10% 保持不变。
-
-MLM 目标是预测原始 byte token。
-
-预训练数据：
-
-- 有标签 flow。
-- 无标签但可解析的 flow。
-- 不进入分类训练的 unmatched flow。
-
-这样可以利用更多原始流量学习字节序列模式。
-
-## 5. 长 flow 滑窗与聚合
-
-单个 flow 可能切成多个窗口：
+单个 flow 可能超过 512 tokens，因此使用滑窗：
 
 ```text
-window_0 -> BERT -> h_0
-window_1 -> BERT -> h_1
-window_2 -> BERT -> h_2
+window_0 -> encoder -> h_0
+window_1 -> encoder -> h_1
+window_2 -> encoder -> h_2
 ```
 
-窗口表示初版取 `[CLS]` hidden state。
+当前 baseline 聚合方式为稳定的窗口 pooling。后续可以比较 mean、max、attention pooling，但不能用更复杂 pooling 掩盖数据泄漏或类别覆盖问题。
 
-flow 聚合候选：
+## 8. 层级分类头
 
-- mean pooling：简单稳定，作为默认实现。
-- attention pooling：学习每个窗口的重要性，作为增强实现。
+分类口径对应 Level-0/1/2：
 
-第一版可先实现 mean pooling，保留 attention pooling 配置位。
+- Level-0：benign vs attack，可由 `major_label != benign` 派生。
+- Level-1：`major_label` softmax 单选。
+- Level-2：`minor_labels` 或 `source_label` 多标签/细类报告。
 
-## 6. 层级分类头
+训练主 loss 当前以 major classification 为核心，minor 输出用于细类诊断和阈值校准。论文报告需要区分 Level-0 detection、Level-1 family classification 和 Level-2 subtype analysis。
 
-分类分为两级。
+## 9. MLM 预训练
 
-### 大类分类
+MLM 是方案3 的增强方向：
 
-大类是单选：
+- 对 byte/SCE token 做 mask prediction。
+- 可使用有标签 flow、未进入监督训练的可解析 flow 或辅助数据。
+- 当前不把 Payload-Byte/USTC 混入正式监督训练，但可以作为后续自监督候选。
+
+## 10. 推理与展示系统
+
+第一版展示系统只要求 PCAP/PCAPNG 上传：
 
 ```text
-major_logits = Linear(flow_repr, num_major_classes)
-major_probs = softmax(major_logits)
+PCAP upload
+  -> PcapFlowExtractor
+  -> masked-header packet view
+  -> Byte-BERT checkpoint
+  -> flow predictions
+  -> file-level risk summary
 ```
 
-loss：
+已有 `traffic-bert predict pcap` 可作为后端原型。Web UI 不改变模型输入语义，只是封装上传、解析、推理和结果展示。
 
-```text
-CrossEntropyLoss
-```
+## 11. 后续模型对比
 
-### 子类分类
-
-子类是大类内部多标签：
-
-```text
-minor_logits = Linear(flow_repr, num_minor_classes)
-minor_probs = sigmoid(minor_logits)
-```
-
-训练时使用 multi-hot 标签。
-
-loss：
-
-```text
-BCEWithLogitsLoss
-```
-
-可以通过 mask 让每条样本只对其大类下的子类计算 loss。
-
-## 7. 总损失
-
-分类微调总损失：
-
-```text
-loss = major_loss + lambda_minor * minor_loss
-```
-
-默认：
-
-```text
-lambda_minor = 1.0
-```
-
-如果子类标签噪声较大，后续可降低 `lambda_minor`。
-
-## 8. 推理逻辑
-
-推理步骤：
-
-1. 对输入 PCAP/hex/bytes 构建 flow。
-2. 转换为 byte token 序列。
-3. 滑窗输入 Byte-BERT。
-4. 聚合窗口表示。
-5. 预测大类。
-6. 只在预测大类对应的子类集合内判断阈值。
-
-输出规则：
-
-- `major_label` 始终输出。
-- 没有子类过阈值时，只输出大类。
-- 多个子类过阈值时：
-  - 最高概率子类为 `primary_minor_label`。
-  - 所有过阈值子类为 `activated_minor_labels`。
-
-示例：
-
-```json
-{
-  "major_label": "web_attack",
-  "major_prob": 0.91,
-  "primary_minor_label": "sql_injection",
-  "primary_minor_prob": 0.77,
-  "activated_minor_labels": [
-    {"label": "sql_injection", "prob": 0.77},
-    {"label": "xss", "prob": 0.61}
-  ]
-}
-```
-
-如果无子类过阈值：
-
-```json
-{
-  "major_label": "web_attack",
-  "major_prob": 0.88,
-  "primary_minor_label": null,
-  "primary_minor_prob": null,
-  "activated_minor_labels": []
-}
-```
-
-## 9. 阈值校准
-
-子类阈值默认从 0.5 开始。
-
-训练完成后，在验证集上为每个子类搜索阈值：
-
-- 优化 F1。
-- 或在指定 FPR 约束下最大化 recall。
-
-最终阈值保存到配置或 checkpoint metadata 中。
-
-## 10. Baseline
-
-为了支撑论文对比，计划实现：
+论文对比不应只比较 accuracy。可选 baseline：
 
 - byte n-gram/TF-IDF + Logistic Regression。
-- byte n-gram/TF-IDF + Linear SVM。
 - 1D-CNN。
-- BiLSTM/GRU。
+- GRU/BiLSTM。
 - Transformer Encoder。
-- Byte-BERT。
+- Byte-BERT baseline。
+- SCE + Byte-BERT。
 
-主模型和 baseline 都读取同一套 `data/processed/` 数据，保证对比公平。
-
+所有对比必须使用同一 processed schema、同一 split、同一 audit 口径。

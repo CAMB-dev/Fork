@@ -19,6 +19,7 @@ class ActivatedMinorLabel:
 class HierarchicalPrediction:
     major_label: str
     major_prob: float
+    major_probs: dict[str, float]
     primary_minor_label: str | None
     primary_minor_prob: float | None
     activated_minor_labels: list[ActivatedMinorLabel]
@@ -27,6 +28,7 @@ class HierarchicalPrediction:
         return {
             "major_label": self.major_label,
             "major_prob": self.major_prob,
+            "major_probs": self.major_probs,
             "primary_minor_label": self.primary_minor_label,
             "primary_minor_prob": self.primary_minor_prob,
             "activated_minor_labels": [
@@ -49,6 +51,10 @@ def decode_hierarchical_prediction(
     major_idx = int(torch.argmax(major_probs).item())
     major_label = label_map.major_labels[major_idx]
     major_prob = float(major_probs[major_idx].item())
+    major_prob_by_label = {
+        label: float(major_probs[index].item())
+        for index, label in enumerate(label_map.major_labels)
+    }
 
     active: list[ActivatedMinorLabel] = []
     for minor_label in label_map.minor_labels_by_major.get(major_label, []):
@@ -64,8 +70,8 @@ def decode_hierarchical_prediction(
     return HierarchicalPrediction(
         major_label=major_label,
         major_prob=major_prob,
+        major_probs=major_prob_by_label,
         primary_minor_label=primary.label if primary else None,
         primary_minor_prob=primary.prob if primary else None,
         activated_minor_labels=active,
     )
-

@@ -144,6 +144,9 @@ def train_classifier_epoch(
                 input_ids=batch["input_ids"].to(device),
                 attention_mask=batch["attention_mask"].to(device),
                 window_mask=batch["window_mask"].to(device),
+                context_features=batch.get("context_features").to(device)
+                if batch.get("context_features") is not None
+                else None,
                 major_labels=major_labels,
                 minor_labels=batch["minor_labels"].to(device),
             )
@@ -223,6 +226,9 @@ def collect_classifier_outputs(
                 input_ids=batch["input_ids"].to(device),
                 attention_mask=batch["attention_mask"].to(device),
                 window_mask=batch["window_mask"].to(device),
+                context_features=batch.get("context_features").to(device)
+                if batch.get("context_features") is not None
+                else None,
                 major_labels=batch_major_labels if compute_loss else None,
                 minor_labels=batch_minor_labels if compute_loss else None,
             )

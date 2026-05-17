@@ -230,8 +230,19 @@ def assign_time_block_split(
             continue
 
         effective_block_size = min(block_size, max(1, count // 3))
+        block_ids = [idx // effective_block_size for idx in range(count)]
+        tail_size = count % effective_block_size
+        if tail_size and count > effective_block_size:
+            min_tail_size = max(2, effective_block_size // 2)
+            if tail_size < min_tail_size:
+                tail_block = block_ids[-1]
+                block_ids = [
+                    tail_block - 1 if block_id == tail_block else block_id
+                    for block_id in block_ids
+                ]
+
         work = ordered.copy()
-        work["_block"] = [idx // effective_block_size for idx in range(count)]
+        work["_block"] = block_ids
         block_frame = (
             work.groupby("_block", sort=True)
             .agg(
@@ -305,12 +316,19 @@ def stratified_sample(
     max_per_class: int = 2_000,
     seed: int = 42,
 ) -> pd.DataFrame:
-    """Return a deterministic per-class capped sample."""
+    """Return a deterministic per-class capped sample.
 
-    if max_per_class <= 0:
-        raise ValueError("max_per_class must be positive")
+    A non-positive cap means "no cap"; formal full-dataset splits use that
+    mode so preprocessing does not silently downsample otherwise complete data.
+    """
+
     if stratify_column not in frame.columns:
         raise KeyError(f"missing stratify_column: {stratify_column}")
+    if max_per_class <= 0:
+        output = frame.copy()
+        if {"start_time", "flow_id"} <= set(frame.columns):
+            output = output.sort_values(["start_time", "flow_id"], kind="mergesort")
+        return output
 
     parts = []
     for _, group in frame.groupby(stratify_column, sort=True):
@@ -351,7 +369,21 @@ def processed_stats(frame: pd.DataFrame, metadata: dict | None = None) -> dict:
         else {},
         "source_labels": dict(Counter(frame.get("source_label", []))),
         "source_datasets": dict(Counter(frame.get("source_dataset", []))),
+        "connection_types": dict(Counter(frame["connection_type"]))
+        if "connection_type" in frame
+        else {},
     }
+    if "was_packet_truncated" in frame:
+        stats["packet_truncated_rows"] = int(frame["was_packet_truncated"].sum())
+        stats["packet_truncated_flows"] = int(
+            frame.loc[frame["was_packet_truncated"], "flow_id"].nunique()
+        )
+    if "observed_packet_count" in frame:
+        stats["observed_packet_count"] = {
+            "min": int(frame["observed_packet_count"].min()),
+            "median": float(frame["observed_packet_count"].median()),
+            "max": int(frame["observed_packet_count"].max()),
+        }
     if "split" in frame:
         stats["split_support"] = {
             "major_labels": support_by_split(frame, "major_label"),

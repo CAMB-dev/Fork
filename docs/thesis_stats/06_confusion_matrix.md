@@ -1,0 +1,11 @@
+| actual\pred | benign | dos_ddos | bruteforce | web_attack | botnet_malware | scan | infiltration | heartbleed | other_attack |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| benign | 240098 | 429 | 7 | 31 | 121 | 3 | 0 | 0 | 0 |
+| dos_ddos | 25 | 13878 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| bruteforce | 1 | 1 | 1054 | 0 | 0 | 0 | 0 | 0 | 0 |
+| web_attack | 0 | 0 | 0 | 285 | 0 | 0 | 0 | 0 | 0 |
+| botnet_malware | 1 | 0 | 0 | 0 | 193 | 0 | 0 | 0 | 0 |
+| scan | 0 | 1 | 0 | 3 | 0 | 23837 | 0 | 0 | 0 |
+| infiltration | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| heartbleed | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| other_attack | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |

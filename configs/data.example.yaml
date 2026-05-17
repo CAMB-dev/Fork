@@ -11,6 +11,7 @@ build:
   label_source: filename
   keep_empty_payload: true
   max_packets_per_flow: null
+  flow_timeout_seconds: 120
   drop_unmatched_labels: true
 
 windowing:

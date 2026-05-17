@@ -2,18 +2,22 @@ seed: 42
 device: cuda
 
 data:
-  train_path: data/processed/train.parquet
-  val_path: data/processed/val.parquet
+  train_path: data/processed/cicids2017/all_masked_header_split_submode_stratified_group_cap32_notcpclose/train.parquet
+  val_path: data/processed/cicids2017/all_masked_header_split_submode_stratified_group_cap32_notcpclose/val.parquet
   label_map: configs/label_map.yaml
   view: masked_header_packet
+  use_connection_tokens: true
   max_length: 512
   stride: 384
-  max_windows: 8
+  max_windows: 2
+  num_workers: 4
 
 train:
   epochs: 3
-  batch_size: 4
+  batch_size: 128
   learning_rate: 0.00003
+  major_class_weighting: sqrt_balanced
+  major_class_weight_cap: 20.0
   weight_decay: 0.01
   gradient_clip_norm: 1.0
   lambda_minor: 1.0

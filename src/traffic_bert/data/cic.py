@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -45,6 +46,25 @@ def canonical_flow_key(
     return proto, a, b
 
 
+def directional_flow_key(
+    src_ip: str,
+    dst_ip: str,
+    src_port: int,
+    dst_port: int,
+    protocol: str | int,
+) -> tuple[str, str, str]:
+    proto = str(protocol).strip().lower()
+    try:
+        proto_number = int(float(proto))
+    except ValueError:
+        proto_number = None
+    if proto in {"tcp"} or proto_number == 6:
+        proto = "tcp"
+    elif proto in {"udp"} or proto_number == 17:
+        proto = "udp"
+    return proto, f"{src_ip}:{int(src_port)}", f"{dst_ip}:{int(dst_port)}"
+
+
 def parse_cic_timestamp(value: Any) -> pd.Timestamp | None:
     if value is None or pd.isna(value):
         return None
@@ -53,6 +73,10 @@ def parse_cic_timestamp(value: Any) -> pd.Timestamp | None:
     if isinstance(value, datetime):
         return pd.Timestamp(value)
     text = str(value).strip()
+    if len(text) >= 10 and text[:4].isdigit() and text[4] in {"-", "/"}:
+        parsed = pd.to_datetime(text, errors="coerce", yearfirst=True)
+        if not pd.isna(parsed):
+            return pd.Timestamp(parsed)
     for dayfirst in (True, False):
         parsed = pd.to_datetime(text, errors="coerce", dayfirst=dayfirst)
         if not pd.isna(parsed):
@@ -76,8 +100,16 @@ def normalize_lookup_timestamp(value: Any) -> pd.Timestamp | None:
 @dataclass(frozen=True)
 class CicLabelRecord:
     key: tuple[str, str, str]
+    directional_key: tuple[str, str, str]
     label: str
     timestamp: pd.Timestamp | None = None
+
+
+@dataclass(frozen=True)
+class CicLabelMatch:
+    label: str
+    mode: str
+    time_delta_seconds: float | None = None
 
 
 class CicFlowLabelIndex:
@@ -85,8 +117,32 @@ class CicFlowLabelIndex:
 
     def __init__(self, records: list[CicLabelRecord]) -> None:
         self.by_key: dict[tuple[str, str, str], list[CicLabelRecord]] = {}
+        self.by_directional_key: dict[tuple[str, str, str], list[CicLabelRecord]] = {}
         for record in records:
             self.by_key.setdefault(record.key, []).append(record)
+            self.by_directional_key.setdefault(record.directional_key, []).append(record)
+        self.by_key_timed = self._build_timed_index(self.by_key)
+        self.by_directional_key_timed = self._build_timed_index(self.by_directional_key)
+
+    @staticmethod
+    def _build_timed_index(
+        index: dict[tuple[str, str, str], list[CicLabelRecord]],
+    ) -> dict[tuple[str, str, str], tuple[list[pd.Timestamp], list[CicLabelRecord]]]:
+        timed_index: dict[
+            tuple[str, str, str],
+            tuple[list[pd.Timestamp], list[CicLabelRecord]],
+        ] = {}
+        for key, records in index.items():
+            timed = sorted(
+                (record for record in records if record.timestamp is not None),
+                key=lambda record: record.timestamp,
+            )
+            if timed:
+                timed_index[key] = (
+                    [record.timestamp for record in timed if record.timestamp is not None],
+                    timed,
+                )
+        return timed_index
 
     @classmethod
     def from_frame(cls, frame: pd.DataFrame) -> "CicFlowLabelIndex":
@@ -142,11 +198,101 @@ class CicFlowLabelIndex:
                         int(data[destination_port_column]),
                         data["protocol"],
                     ),
+                    directional_key=directional_flow_key(
+                        data[source_ip_column],
+                        data[destination_ip_column],
+                        int(data[source_port_column]),
+                        int(data[destination_port_column]),
+                        data["protocol"],
+                    ),
                     label=str(data["label"]),
                     timestamp=timestamp,
                 )
             )
         return cls(records)
+
+    def _best_match(
+        self,
+        candidates: list[CicLabelRecord],
+        lookup_timestamp: pd.Timestamp | None,
+        max_time_delta_seconds: float | None,
+        timed_candidates: tuple[list[pd.Timestamp], list[CicLabelRecord]] | None = None,
+    ) -> tuple[CicLabelRecord | None, float | None]:
+        if not candidates:
+            return None, None
+        if lookup_timestamp is None:
+            return candidates[0], None
+        if timed_candidates is None:
+            return candidates[0], None
+        timestamps, records = timed_candidates
+        if not timestamps:
+            return candidates[0], None
+        insert_at = bisect_left(timestamps, lookup_timestamp)
+        nearest: list[CicLabelRecord] = []
+        if insert_at < len(records):
+            nearest.append(records[insert_at])
+        if insert_at > 0:
+            nearest.append(records[insert_at - 1])
+        best = min(nearest, key=lambda item: abs(item.timestamp - lookup_timestamp))
+        delta = abs(best.timestamp - lookup_timestamp).total_seconds()
+        if max_time_delta_seconds is not None and delta > max_time_delta_seconds:
+            return None, delta
+        return best, delta
+
+    def lookup_detailed(
+        self,
+        src_ip: str,
+        dst_ip: str,
+        src_port: int,
+        dst_port: int,
+        protocol: str | int,
+        timestamp: Any = None,
+        max_time_delta_seconds: float | None = None,
+    ) -> CicLabelMatch | None:
+        lookup_timestamp = normalize_lookup_timestamp(timestamp)
+        exact_key = directional_flow_key(src_ip, dst_ip, src_port, dst_port, protocol)
+        reverse_key = directional_flow_key(dst_ip, src_ip, dst_port, src_port, protocol)
+        canonical_key = canonical_flow_key(src_ip, dst_ip, src_port, dst_port, protocol)
+
+        directed_matches: list[tuple[str, CicLabelRecord, float | None]] = []
+        for mode, key, candidates in [
+            ("directional", exact_key, self.by_directional_key.get(exact_key, [])),
+            (
+                "directional_reversed",
+                reverse_key,
+                self.by_directional_key.get(reverse_key, []),
+            ),
+        ]:
+            best, delta = self._best_match(
+                candidates,
+                lookup_timestamp,
+                max_time_delta_seconds,
+                self.by_directional_key_timed.get(key),
+            )
+            if best is not None:
+                directed_matches.append((mode, best, delta))
+        if directed_matches:
+            if lookup_timestamp is None:
+                mode, best, delta = directed_matches[0]
+            else:
+                mode, best, delta = min(
+                    directed_matches,
+                    key=lambda item: (
+                        float("inf") if item[2] is None else item[2],
+                        0 if item[0] == "directional" else 1,
+                    ),
+                )
+            return CicLabelMatch(best.label, mode, delta)
+
+        best, delta = self._best_match(
+            self.by_key.get(canonical_key, []),
+            lookup_timestamp,
+            max_time_delta_seconds,
+            self.by_key_timed.get(canonical_key),
+        )
+        if best is not None:
+            return CicLabelMatch(best.label, "canonical_fallback", delta)
+        return None
 
     def lookup(
         self,
@@ -156,19 +302,15 @@ class CicFlowLabelIndex:
         dst_port: int,
         protocol: str | int,
         timestamp: Any = None,
+        max_time_delta_seconds: float | None = None,
     ) -> str | None:
-        key = canonical_flow_key(src_ip, dst_ip, src_port, dst_port, protocol)
-        candidates = self.by_key.get(key, [])
-        if not candidates:
-            return None
-        lookup_timestamp = normalize_lookup_timestamp(timestamp)
-        if lookup_timestamp is None or len(candidates) == 1:
-            return candidates[0].label
-        candidates_with_time = [item for item in candidates if item.timestamp is not None]
-        if not candidates_with_time:
-            return candidates[0].label
-        best = min(
-            candidates_with_time,
-            key=lambda item: abs(item.timestamp - lookup_timestamp),
+        match = self.lookup_detailed(
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            protocol,
+            timestamp=timestamp,
+            max_time_delta_seconds=max_time_delta_seconds,
         )
-        return best.label
+        return None if match is None else match.label

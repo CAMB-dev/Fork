@@ -1,8 +1,13 @@
 from pathlib import Path
 
 import torch
+import pandas as pd
 
-from traffic_bert.cli import _load_bert_encoder_from_mlm, _make_classifier
+from traffic_bert.cli import (
+    _compute_major_class_weights,
+    _load_bert_encoder_from_mlm,
+    _make_classifier,
+)
 from traffic_bert.config import append_jsonl, load_yaml, set_seed, write_json
 from traffic_bert.labels import LabelMap
 from traffic_bert.models import create_mlm_model
@@ -58,3 +63,23 @@ def test_load_bert_encoder_from_mlm_checkpoint(tmp_path: Path) -> None:
         mlm.bert.embeddings.word_embeddings.weight,
     )
 
+
+def test_compute_major_class_weights_caps_extreme_imbalance() -> None:
+    label_map = LabelMap.from_yaml("configs/label_map.yaml")
+    frame = pd.DataFrame(
+        {
+            "major_label": ["benign"] * 100 + ["botnet_malware"] + ["scan"] * 4,
+        }
+    )
+
+    weights = _compute_major_class_weights(
+        frame,
+        label_map,
+        mode="sqrt_balanced",
+        cap=5.0,
+    )
+
+    assert weights is not None
+    assert weights[label_map.major_id("botnet_malware")] == 5.0
+    assert weights[label_map.major_id("benign")] >= 0.2
+    assert weights[label_map.major_id("heartbleed")] == 0.0

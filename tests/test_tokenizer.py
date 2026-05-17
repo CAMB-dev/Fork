@@ -27,6 +27,22 @@ def test_parse_hex_and_window_flow() -> None:
     assert "[PKT_END]" in windows[0].tokens
 
 
+def test_connection_type_prefix_token_keeps_byte_ids_stable() -> None:
+    tokenizer = ByteTokenizer()
+    byte_id = tokenizer.token_to_id["b_00"]
+    windows = tokenizer.encode_flow(
+        [PacketChunk(direction="fwd", data=b"A")],
+        max_length=8,
+        stride=4,
+        padding=True,
+        prefix_tokens=[tokenizer.connection_type_token("tcp_reset_or_refused")],
+    )
+
+    assert byte_id == 8
+    assert windows[0].tokens[1] == "[CONN_TCP_RESET_OR_REFUSED]"
+    assert "[PKT_FWD]" in windows[0].tokens
+
+
 def test_long_flow_creates_multiple_windows() -> None:
     tokenizer = ByteTokenizer()
     tokens = tokenizer.bytes_to_tokens(bytes(range(20)))
@@ -34,4 +50,3 @@ def test_long_flow_creates_multiple_windows() -> None:
 
     assert len(windows) == 3
     assert all(len(item.input_ids) == 10 for item in windows)
-

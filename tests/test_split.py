@@ -98,6 +98,32 @@ def test_assign_stratified_hash_split_keeps_groups_and_labels_present() -> None:
     assert (counts > 0).all().all()
 
 
+def test_assign_stratified_hash_split_can_balance_source_file_major_labels() -> None:
+    rows = []
+    for label in ["benign", "botnet_malware"]:
+        for source_index in range(6):
+            for flow_index in range(2):
+                rows.append(
+                    {
+                        "flow_id": f"{label}-{source_index}-{flow_index}",
+                        "source_file": f"{label}-{source_index}.pcap",
+                        "major_label": label,
+                    }
+                )
+    frame = pd.DataFrame(rows)
+
+    result = assign_stratified_hash_split(
+        frame,
+        group_column="source_file",
+        stratify_column="major_label",
+    )
+
+    assert result.groupby("source_file")["split"].nunique().max() == 1
+    counts = result.groupby(["major_label", "split"])["source_file"].nunique().unstack(fill_value=0)
+    assert set(counts.columns) == {"train", "val", "test"}
+    assert (counts > 0).all().all()
+
+
 def test_assign_time_ordered_split_orders_within_each_label() -> None:
     frame = pd.DataFrame(
         {
@@ -152,6 +178,29 @@ def test_assign_time_block_split_keeps_nearby_blocks_together() -> None:
         assert group.groupby("block")["split"].nunique().max() == 1
 
 
+def test_assign_time_block_split_merges_tiny_tail_block() -> None:
+    frame = pd.DataFrame(
+        {
+            "flow_id": [f"bot-{idx}" for idx in range(1228)],
+            "source_label": ["Bot"] * 1228,
+            "start_time": list(range(1228)),
+        }
+    )
+
+    result = assign_time_block_split(
+        frame,
+        group_column="flow_id",
+        stratify_column="source_label",
+        time_column="start_time",
+        block_size=512,
+        seed=42,
+    )
+
+    counts = result["split"].value_counts()
+    assert {"train", "val", "test"} <= set(counts.index)
+    assert counts.min() >= 100
+
+
 def test_stratified_sample_caps_each_class() -> None:
     frame = pd.DataFrame(
         {
@@ -166,4 +215,22 @@ def test_stratified_sample_caps_each_class() -> None:
     assert sampled["major_label"].value_counts().to_dict() == {
         "benign": 2,
         "dos_ddos": 2,
+    }
+
+
+def test_stratified_sample_zero_cap_keeps_all_rows() -> None:
+    frame = pd.DataFrame(
+        {
+            "flow_id": ["f3", "f1", "f2"],
+            "major_label": ["benign", "benign", "dos_ddos"],
+            "start_time": [3.0, 1.0, 2.0],
+        }
+    )
+
+    sampled = stratified_sample(frame, max_per_class=0, seed=1)
+
+    assert sampled["flow_id"].tolist() == ["f1", "f2", "f3"]
+    assert sampled["major_label"].value_counts().to_dict() == {
+        "benign": 2,
+        "dos_ddos": 1,
     }

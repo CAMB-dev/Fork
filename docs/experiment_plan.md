@@ -1,200 +1,167 @@
 # 实验计划
 
-本文档用于规划毕设实验、消融实验和论文图表。
+本文档规划当前阶段实验、验收标准和后续扩展。当前阶段目标是 CICIDS2017 baseline + PCAP 推理 demo，不处理 IoT-23/CTU-13。
 
-## 1. 实验目标
+## 1. 当前阶段问题
 
-实验需要回答以下问题：
+当前阶段需要回答：
 
-1. 基于原始字节序列的 Byte-BERT 是否能完成恶意流量分类。
-2. flow 级建模是否能有效利用 payload 和包序列信息。
-3. 包头信息到底是有效特征，还是数据集偏差。
-4. MLM 预训练是否提升分类性能。
-5. Byte-BERT 相比传统方法、CNN/RNN/Transformer 是否有优势。
+1. PCAP-first 数据链路能否稳定构建 flow 级训练样本。
+2. Byte-BERT baseline 能否在审计合格的 CICIDS2017 split 上完成恶意流量分类。
+3. 结果是否经得起 macro/per-class 指标检查，而不是只依赖 accuracy。
+4. PCAP 上传推理 demo 是否能复用同一 flow extraction 和模型推理链路。
+
+SCE 是下一阶段核心创新，不在当前阶段强行实现。
 
 ## 2. 数据集组合
 
-第一阶段：
+当前阶段：
 
-- USTC-TFC2016：当前主监督训练集，已完成 flow 级 `payload_only` 预处理、重标、合并和划分。
-- Payload-Byte：当前作为 MLM post-train 候选数据，包含 Payload-Byte 版 CICIDS2017 和 UNSW，不直接混入第一阶段监督训练。
-- CICIDS2017 原始 PCAP + CSV：下一批优先处理，用于补齐更多攻击大类。
+- CICIDS2017 原始 PCAP + CSV：正式 baseline 数据集。
+- USTC-TFC2016：辅助诊断和 sanity，不作为严格正式主结论。
+- Payload-Byte：辅助 sanity 或自监督候选，不进入当前监督主训练。
 
-后续扩展：
+后续阶段：
 
-- CIC-DDoS2019。
-- CSE-CIC-IDS2018。
-- CTU-13。
-
-每个数据集需要记录：
-
-- 原始样本数量。
-- 成功解析 flow 数量。
-- 有标签 flow 数量。
-- 无标签 flow 数量。
-- 各大类/细类数量。
-- train/val/test 划分比例。
+- IoT-23：跨场景泛化验证。
+- CTU-13：botnet 泛化补充。
 
 当前训练路线：
 
 ```text
-MLM post-train:
-  USTC + Payload-Byte 的 payload_only 字节序列
+方案1 baseline:
+  CICIDS2017 all_masked_header_split_submode_stratified_group_cap32_notcpclose
 
-监督 fine-tune:
+压力测试:
+  CICIDS2017 all_masked_header_split_time_block
+
+辅助诊断:
+  USTC split_source_file_major_balanced
+
+sanity / upper-bound:
   USTC split_label_stratified
-
-泛化对照:
-  USTC split_source_file
 ```
 
-不直接综合 USTC 和 Payload-Byte 做第一阶段监督训练，原因是 USTC 是 flow 级样本，而 Payload-Byte 是单包行级样本，直接混合容易引入数据集来源偏差。
+## 3. CICIDS2017 baseline 实验
 
-## 3. 主实验
+正式 baseline 使用：
 
-主实验使用：
+- 全量 Monday-Friday PCAP。
+- `masked_header_packet` 输入视图。
+- 保留空 payload flow。
+- `flow_timeout_seconds=120`。
+- coverage gate + split audit + formal dataset gate。
+- `all_masked_header_split_submode_stratified_group_cap32_notcpclose` 作为可训练主 split。
 
-- 输入视图：根据消融结果选择，预计优先比较 `payload_only` 和 `masked_header_packet`。
-- 模型：Byte-BERT。
-- 训练流程：MLM 预训练 + 分类微调。
-- 数据划分：文件或时间划分。
-- 主指标：Macro-F1。
+`time_block` 只作为压力测试，报告它是否暴露时间外推或子形态外推失败。
 
-报告指标：
+## 4. 训练验收标准
+
+正式 run 必须报告：
 
 - Accuracy。
-- Macro Precision。
-- Macro Recall。
-- Macro-F1。
+- Macro Precision/Recall/F1。
 - Weighted-F1。
-- per-class Precision/Recall/F1。
+- Per-class precision/recall/F1。
 - Confusion matrix。
-- 恶意检测 TPR、FPR、FNR。
+- Level-0 attack detection precision/recall/F1、FPR、FNR。
+- Split audit 和 formal gate。
 
-## 4. 消融实验
+通过判断不能只看 accuracy 或 weighted-F1。最低要求：
 
-### 输入视图消融
+- `formal_eligible=true`。
+- `blocking_warnings=[]`。
+- support 足够的关键类必须有可接受的 recall/F1。
+- Bot 等关键类明显漏判时，run 标记为 failed 或 needs review。
+- Heartbleed/Infiltration 等极低样本类标记为 low-support reported-only，不作为当前可训练主类别验收。
 
-比较：
+当前已知结果状态：
+
+- 当前可信数据版本是 cap32 + no-close 的 full-PCAP build：
+  `/root/Fork/data/processed/cicids2017/all_masked_header_packet_cap32_notcpclose`。
+- 当前最强 flow-level baseline 是 v16：
+  `/root/Fork/artifacts/cicids2017_masked_header_submode_group_formal_cuda_v16_cap32_notcpclose_conn_b128_w4_sqrt_weighted`。
+- v16 使用 `connection tokens + sqrt_balanced`，test Bot precision/recall/F1 约 `0.615/0.995/0.760`，达到当前毕设可交付口径。
+- v11/v12/v13 分别尝试 context tokens、balanced loss、numeric context side-channel，均因 Bot 误报过多而停止。
+- Bot 阈值扫描没有找到满足 `recall >= 0.8` 且 `F1 >= 0.75` 的阈值。
+- `scripts/analyze_bot_host_windows.py` 已用 v10/v16 预测做 host-window 诊断。
+- v16 flow-level Bot 已通过；host-window 风险层只作为展示/告警辅助，不覆盖 flow-level 指标。
+- `formal_run_summary.json` 中 `acceptance.formal_eligible=true`；Infiltration 仍是 low-support reported-only，BruteForce 截断比例需要在报告中说明。
+- Bot 复盘显示旧 `close_on_tcp_flags=true` 会把同一连接切成大量无 payload 关闭片段；v16 改为 `false` 后保留 TCP close/reset 信息但不单独切训练 flow。
+- Infiltration support 极低，不能作为主类别可训练性结论。
+- 后续应保留 v16 作为 flow-level Byte-BERT baseline；若继续提升 Bot，应设计 host/session-window 辅助判别或更语义化的 SCE，而不是继续盲调 class weight 或 context token。
+
+## 5. SCE 实验路线
+
+SCE 不阻塞当前 baseline，但论文路线应保留三阶段：
+
+1. Byte-BERT baseline：固定 byte token 和 masked header packet。
+2. SCE 最小版：将 byte/header/flow pattern 转成语义 token 或 codebook。
+3. SCE + 自监督：在更多未标注或辅助数据上做预训练，再验证泛化。
+
+SCE 实现前需要明确：
+
+- 语义 token 的构造规则或学习方式。
+- 是否保留原始 byte token 作为 fallback。
+- SCE 输出如何接入现有 `FlowWindowDataset`。
+- 与 Byte-BERT baseline 使用同一 split 和同一验收指标。
+
+当前 SCE v0 状态：
+
+- 已实现频率 byte-chunk codebook 骨架：`src/traffic_bert/sce.py`。
+- 已提供 CLI：`traffic-bert sce build-codebook`。
+- 已接入 `FlowWindowDataset`、classifier train/eval、threshold calibration 和 PCAP/hex prediction。
+- classifier checkpoint 会嵌入 codebook 元数据，评估/预测可以自动恢复。
+- 已在远端 CICIDS train 抽样 `20000` 行上生成样例：
+  `/root/Fork/artifacts/sce/cicids_v0_frequency_codebook_sample.json`。
+- v0 默认跳过全零 chunk，避免 masked-header 的零填充主导 codebook。
+- v14 已跑 `connection + SCE v0 frequency codebook 64 tokens + sqrt_balanced` 对照，第 1 epoch 后因 Bot 误报过多停止。
+- v14 test 指标：macro-F1 约 `0.780`，Bot precision/recall/F1 约 `0.452/0.761/0.567`。
+- 已补充 label-lift codebook 和按标签 reservoir 抽样，v15 使用 Bot 专用 64-token codebook 做 1 epoch probe。
+- v15 test 指标：macro-F1 约 `0.783`，Bot precision/recall/F1 约 `0.462/0.777/0.579`；30/60/300 秒 host-window 均未通过。
+- 当前结论：朴素高频 byte-chunk 和简单 label-lift byte-chunk 都不优于当前 Byte-BERT baseline；下一版 SCE 必须转向更有语义的 chunk/cluster/行为 token。
+
+## 6. PCAP 展示系统
+
+第一版 demo 只支持 PCAP/PCAPNG 上传：
 
 ```text
-payload_only
-full_packet
-masked_header_packet
+上传 PCAP
+  -> flow 解析
+  -> masked-header packet view
+  -> checkpoint 推理
+  -> flow 级结果
+  -> 文件级风险汇总
 ```
 
-目的：
+展示系统验收：
 
-- 判断包头是否有帮助。
-- 判断完整包指标是否来自 IP/端口等捷径。
-- 为论文中最终输入选择提供证据。
+- 能处理一个小型 PCAP。
+- 能列出 flow 数、攻击/良性预测数量和高风险 flow。
+- 能展示每个 flow 的 major prediction、confidence 和可选 minor labels。
+- 能展示 host/session-window 风险汇总，尤其用于解释 Bot 这类单 flow 难以稳定区分的行为。
+- 后端复用 `traffic-bert predict pcap` 的能力，不另造一套解析逻辑。
+- 当前 CLI 后端已输出 `{summary, flows}`，UI 上传页可以直接调用该能力。
 
-### MLM 预训练消融
+## 7. 后续泛化实验
 
-比较：
+IoT-23 和 CTU-13 暂不进入当前工程目标。它们的进入条件：
 
-```text
-Byte-BERT without MLM
-Byte-BERT with MLM
-```
+- CICIDS baseline 和 demo 已稳定。
+- 训练后验收 gate 已经能阻断 high-accuracy/low-key-class-recall 的 run。
+- SCE 最小版有明确输入输出。
 
-目的：
+泛化实验要单独报告 dataset shift，不与 CICIDS 当前主结果混成一个指标。
 
-- 验证自监督预训练对 payload 字节建模的帮助。
+## 8. 图表与论文材料
 
-### 长度和滑窗消融
+当前阶段优先生成：
 
-比较：
-
-```text
-max_len = 256
-max_len = 512
-不同 stride
-截断 vs 滑窗
-```
-
-目的：
-
-- 证明长 flow 不应简单截断。
-- 找到显存和效果之间的平衡点。
-
-### 聚合方式消融
-
-比较：
-
-```text
-mean pooling
-attention pooling
-max pooling
-```
-
-目的：
-
-- 判断多个窗口如何聚合最合适。
-
-## 5. Baseline 对比
-
-计划对比模型：
-
-1. n-gram/TF-IDF + Logistic Regression。
-2. n-gram/TF-IDF + Linear SVM。
-3. 1D-CNN。
-4. BiLSTM 或 GRU。
-5. Transformer Encoder。
-6. Byte-BERT without MLM。
-7. Byte-BERT with MLM。
-
-所有模型应尽量使用相同的 train/val/test 划分和标签体系。
-
-## 6. 分类输出评估
-
-大类评估：
-
-- 按单标签多分类评估。
-- 使用 confusion matrix 和 per-class 指标。
-
-子类评估：
-
-- 按多标签评估。
-- 报告 micro/macro F1。
-- 报告每个子类阈值。
-- 分析无子类过阈值时只输出大类的比例。
-
-输出逻辑评估：
-
-- 大类正确但子类未命中。
-- 大类正确且主子类正确。
-- 大类错误导致子类不评估。
-
-## 7. 论文图表建议
-
-建议生成以下图表：
-
-- 数据集处理流程图。
-- Byte-BERT 模型结构图。
-- 层级分类输出示意图。
-- 各数据集类别分布表。
-- 三种输入视图消融结果表。
-- baseline 对比表。
-- confusion matrix。
-- per-class F1 柱状图。
-- 子类阈值校准曲线。
-- flow 长度分布图。
-
-## 8. 成功标准
-
-第一阶段工程成功标准：
-
-- 能从 PCAP 构建 flow 级 processed 数据。
-- 能完成字节 token 化和滑窗。
-- 能跑通 Byte-BERT MLM 预训练。
-- 能跑通分类微调。
-- 能输出大类和子类阈值结果。
-- 能在小样本上完成端到端 CLI 推理。
-
-论文成功标准：
-
-- 数据处理流程可解释。
-- 模型设计和题目要求一致。
-- 实验对比和消融足够支撑结论。
-- 指标不只依赖 accuracy，能体现类别不均衡下的真实性能。
+- 数据处理流程图。
+- Byte-BERT baseline 结构图。
+- SCE 概念图。
+- CICIDS2017 类别分布表。
+- Coverage/audit 摘要表。
+- Confusion matrix。
+- Per-class F1/recall 柱状图。
+- PCAP demo 流程截图或接口示意。

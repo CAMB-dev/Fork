@@ -20,6 +20,7 @@ def test_decode_hierarchical_prediction_primary_and_candidates() -> None:
     )
 
     assert prediction.major_label == "web_attack"
+    assert prediction.major_probs["web_attack"] == prediction.major_prob
     assert prediction.primary_minor_label == "sql_injection"
     assert [item.label for item in prediction.activated_minor_labels] == [
         "sql_injection",
@@ -36,6 +37,6 @@ def test_decode_hierarchical_prediction_major_only() -> None:
     prediction = decode_hierarchical_prediction(major_logits, minor_logits, label_map)
 
     assert prediction.major_label == "web_attack"
+    assert set(prediction.major_probs) == set(label_map.major_labels)
     assert prediction.primary_minor_label is None
     assert prediction.activated_minor_labels == []
-

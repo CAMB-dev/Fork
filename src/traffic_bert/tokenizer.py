@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 
 PAD_TOKEN = "[PAD]"
@@ -15,6 +15,11 @@ MASK_TOKEN = "[MASK]"
 PKT_FWD_TOKEN = "[PKT_FWD]"
 PKT_BWD_TOKEN = "[PKT_BWD]"
 PKT_END_TOKEN = "[PKT_END]"
+CONN_TCP_PAYLOAD_TOKEN = "[CONN_TCP_PAYLOAD]"
+CONN_TCP_CONTROL_ONLY_TOKEN = "[CONN_TCP_CONTROL_ONLY]"
+CONN_TCP_RESET_OR_REFUSED_TOKEN = "[CONN_TCP_RESET_OR_REFUSED]"
+CONN_UDP_PAYLOAD_TOKEN = "[CONN_UDP_PAYLOAD]"
+CONN_OTHER_TOKEN = "[CONN_OTHER]"
 
 SPECIAL_TOKENS = [
     PAD_TOKEN,
@@ -28,6 +33,42 @@ SPECIAL_TOKENS = [
 ]
 
 BYTE_TOKENS = [f"b_{value:02x}" for value in range(256)]
+CONNECTION_TYPE_TOKENS = [
+    CONN_TCP_PAYLOAD_TOKEN,
+    CONN_TCP_CONTROL_ONLY_TOKEN,
+    CONN_TCP_RESET_OR_REFUSED_TOKEN,
+    CONN_UDP_PAYLOAD_TOKEN,
+    CONN_OTHER_TOKEN,
+]
+CONTEXT_FEATURES = [
+    "H60",
+    "H300",
+    "R60",
+    "C60",
+    "P0_60",
+    "DPORT60",
+    "DHOST60",
+]
+CONTEXT_BUCKETS = [
+    "0",
+    "1",
+    "2_4",
+    "5_9",
+    "10_19",
+    "20_49",
+    "50_PLUS",
+]
+CONTEXT_TOKENS = [
+    f"[CTX_{feature}_{bucket}]"
+    for feature in CONTEXT_FEATURES
+    for bucket in CONTEXT_BUCKETS
+]
+CONNECTION_TYPE_TOKEN_MAP = {
+    "tcp_payload": CONN_TCP_PAYLOAD_TOKEN,
+    "tcp_control_only": CONN_TCP_CONTROL_ONLY_TOKEN,
+    "tcp_reset_or_refused": CONN_TCP_RESET_OR_REFUSED_TOKEN,
+    "udp_payload": CONN_UDP_PAYLOAD_TOKEN,
+}
 HEX_RE = re.compile(r"^(?:0x)?[0-9a-fA-F]+$")
 
 
@@ -56,8 +97,18 @@ class ByteTokenizer:
     compatible with BERT-style embedding tables and MLM pretraining.
     """
 
-    def __init__(self) -> None:
-        self.tokens = SPECIAL_TOKENS + BYTE_TOKENS
+    def __init__(self, extra_tokens: Sequence[str] | None = None) -> None:
+        # Keep byte token ids stable by appending newer metadata tokens after
+        # the original special-token + byte-token block.
+        base_tokens = SPECIAL_TOKENS + BYTE_TOKENS + CONNECTION_TYPE_TOKENS + CONTEXT_TOKENS
+        extra = list(extra_tokens or [])
+        duplicate_extra = {token for token in extra if extra.count(token) > 1}
+        if duplicate_extra:
+            raise ValueError(f"duplicate extra tokens: {sorted(duplicate_extra)}")
+        reserved = sorted(set(base_tokens) & set(extra))
+        if reserved:
+            raise ValueError(f"extra tokens overlap reserved vocabulary: {reserved}")
+        self.tokens = [*base_tokens, *extra]
         self.token_to_id = {token: idx for idx, token in enumerate(self.tokens)}
         self.id_to_token = {idx: token for token, idx in self.token_to_id.items()}
 
@@ -115,8 +166,43 @@ class ByteTokenizer:
     def ids_to_tokens(self, ids: Iterable[int]) -> list[str]:
         return [self.id_to_token.get(int(idx), UNK_TOKEN) for idx in ids]
 
-    def flow_tokens(self, chunks: Sequence[PacketChunk]) -> list[str]:
-        tokens: list[str] = []
+    def connection_type_token(self, value: object) -> str:
+        return CONNECTION_TYPE_TOKEN_MAP.get(str(value), CONN_OTHER_TOKEN)
+
+    @staticmethod
+    def context_bucket(value: object) -> str:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = 0
+        if number <= 0:
+            return "0"
+        if number == 1:
+            return "1"
+        if number <= 4:
+            return "2_4"
+        if number <= 9:
+            return "5_9"
+        if number <= 19:
+            return "10_19"
+        if number <= 49:
+            return "20_49"
+        return "50_PLUS"
+
+    def context_token(self, feature: str, value: object) -> str:
+        bucket = self.context_bucket(value)
+        token = f"[CTX_{feature}_{bucket}]"
+        if token not in self.token_to_id:
+            raise ValueError(f"unsupported context feature: {feature}")
+        return token
+
+    def flow_tokens(
+        self,
+        chunks: Sequence[PacketChunk],
+        prefix_tokens: Sequence[str] | None = None,
+        byte_token_encoder: Callable[[bytes], Sequence[str]] | None = None,
+    ) -> list[str]:
+        tokens: list[str] = list(prefix_tokens or [])
         for chunk in chunks:
             direction = chunk.direction.lower()
             if direction in {"fwd", "forward", "client"}:
@@ -125,7 +211,10 @@ class ByteTokenizer:
                 tokens.append(PKT_BWD_TOKEN)
             else:
                 raise ValueError(f"unsupported packet direction: {chunk.direction}")
-            tokens.extend(self.bytes_to_tokens(chunk.data))
+            if byte_token_encoder is None:
+                tokens.extend(self.bytes_to_tokens(chunk.data))
+            else:
+                tokens.extend(byte_token_encoder(chunk.data))
             tokens.append(PKT_END_TOKEN)
         return tokens
 
@@ -204,9 +293,15 @@ class ByteTokenizer:
         max_length: int = 512,
         stride: int = 384,
         padding: bool = True,
+        prefix_tokens: Sequence[str] | None = None,
+        byte_token_encoder: Callable[[bytes], Sequence[str]] | None = None,
     ) -> list[WindowEncoding]:
         return self.window_tokens(
-            self.flow_tokens(chunks),
+            self.flow_tokens(
+                chunks,
+                prefix_tokens=prefix_tokens,
+                byte_token_encoder=byte_token_encoder,
+            ),
             max_length=max_length,
             stride=stride,
             padding=padding,
@@ -229,4 +324,3 @@ class ByteTokenizer:
         with open(path, "w", encoding="utf-8") as handle:
             for token in self.tokens:
                 handle.write(f"{token}\n")
-

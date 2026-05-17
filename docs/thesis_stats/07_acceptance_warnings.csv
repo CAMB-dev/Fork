@@ -1,0 +1,5 @@
+﻿warning
+infiltration has test support 2; report it as low-support only
+train bruteforce packet truncation ratio 0.421 > warning threshold 0.250
+val bruteforce packet truncation ratio 0.423 > warning threshold 0.250
+test bruteforce packet truncation ratio 0.421 > warning threshold 0.250
