@@ -813,6 +813,11 @@ def _semantic_codebook_from_checkpoint(checkpoint: Path) -> SemanticCodebook | N
     return None
 
 
+def _checkpoint_uses_connection_tokens(checkpoint: Path) -> bool:
+    payload = torch.load(checkpoint, map_location="cpu")
+    return bool(payload.get("use_connection_tokens", False))
+
+
 def _resolve_semantic_codebook(
     path: Optional[Path],
     *,
@@ -2146,6 +2151,7 @@ def predict_pcap(
 
         byte_token_encoder = encode_with_codebook
     input_view = InputView(view)
+    use_connection_tokens = _checkpoint_uses_connection_tokens(checkpoint)
     flows = PcapFlowExtractor(
         max_packets_per_flow=max_packets_per_flow,
         flow_timeout_seconds=flow_timeout_seconds,
@@ -2164,6 +2170,9 @@ def predict_pcap(
         output.parent.mkdir(parents=True, exist_ok=True)
         output_handle = open(output, "w", encoding="utf-8")
     for flow in flows:
+        prefix_tokens = None
+        if use_connection_tokens:
+            prefix_tokens = [tokenizer.connection_type_token(flow.connection_type)]
         chunks = [
             PacketChunk(direction=packet.direction, data=packet.bytes_for_view(input_view))
             for packet in flow.packets
@@ -2173,6 +2182,7 @@ def predict_pcap(
             max_length=max_length,
             stride=stride,
             padding=True,
+            prefix_tokens=prefix_tokens,
             byte_token_encoder=byte_token_encoder,
         )
         if max_windows is not None:

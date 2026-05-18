@@ -15,6 +15,7 @@ from typing import Any
 import torch
 
 from traffic_bert.cli import (
+    _checkpoint_uses_connection_tokens,
     _load_classifier,
     _load_host_window_policies,
     _load_thresholds,
@@ -272,6 +273,9 @@ def _predict_pcap(server: "DemoServer", pcap_path: Path) -> dict[str, Any]:
     predictions: list[dict[str, Any]] = []
     input_view = InputView(server.view)
     for flow in flows:
+        prefix_tokens = None
+        if server.use_connection_tokens:
+            prefix_tokens = [server.tokenizer.connection_type_token(flow.connection_type)]
         chunks = [
             PacketChunk(direction=packet.direction, data=packet.bytes_for_view(input_view))
             for packet in flow.packets
@@ -281,6 +285,7 @@ def _predict_pcap(server: "DemoServer", pcap_path: Path) -> dict[str, Any]:
             max_length=server.max_length,
             stride=server.stride,
             padding=True,
+            prefix_tokens=prefix_tokens,
             byte_token_encoder=server.byte_token_encoder,
         )
         if server.max_windows is not None:
@@ -434,6 +439,7 @@ class DemoServer(ThreadingHTTPServer):
         self.tokenizer = ByteTokenizer(
             extra_tokens=self.semantic_codebook.tokens if self.semantic_codebook is not None else None
         )
+        self.use_connection_tokens = _checkpoint_uses_connection_tokens(checkpoint)
         self.byte_token_encoder = None
         if self.semantic_codebook is not None:
             def encode_with_codebook(data: bytes) -> list[str]:
